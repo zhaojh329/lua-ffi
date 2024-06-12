@@ -1,0 +1,32 @@
+name: build
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - version: 5.1
+            pkg: liblua5.1-0-dev
+            macro: USE_LUA51
+          - version: 5.2
+            pkg: liblua5.2-dev
+            macro: USE_LUA52
+          - version: 5.3
+            pkg: liblua5.3-dev
+            macro: USE_LUA53
+          - version: 5.4
+            pkg: liblua5.4-dev
+            macro: USE_LUA54
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: build
+        run: |
+          sudo apt update
+          sudo apt install -y libffi-dev lua${{ matrix.version }} ${{ matrix.pkg }}
+          cmake . -D${{ matrix.macro }}=ON && make && sudo make install
+          gcc -shared -fPIC tests/test.c -o libtest.so
+          lua${{ matrix.version }} ./tests/basetype.lua
+          lua${{ matrix.version }} ./tests/test.lua
