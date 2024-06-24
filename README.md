@@ -35,15 +35,6 @@ with [LuaJIT] FFI, but written from scratch in C language.
 
 ## Example
 
-```c
-// create a file named add.c and compile it to a dynamic lib.
-// gcc -o libadd.so -fPIC -shared add.c
-int add(int x, int y)
-{
-    return x + y;
-}
-```
-
 ```lua
 local ffi = require 'ffi'
 
@@ -55,8 +46,6 @@ ffi.cdef([[
 
     int gettimeofday(struct timeval *tv, struct timezone *tz);
     char *strerror(int errnum);
-
-    int add(int x, int y);
 ]])
 
 local function strerror(errno)
@@ -70,9 +59,6 @@ if ffi.C.gettimeofday(tv, nil) < 0 then
 else
     print('tv.tv_sec:', tv.tv_sec, 'tv.tv_usec:', tv.tv_usec)
 end
-
-local mylib = ffi.load('./libadd.so')
-print('add:', mylib.add(1, 2))
 ```
 
 ## Basic types supported
