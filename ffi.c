@@ -140,6 +140,7 @@ static const char *carray_registry;
 static const char *cfunc_registry;
 static const char *ctype_registry;
 static const char *ctdef_registry;
+static const char *clib_registry;
 
 #if LUA_VERSION_NUM < 503
 
@@ -2038,6 +2039,13 @@ static int load_lib(lua_State *L, const char *path, bool global)
     luaL_getmetatable(L, CLIB_MT);
     lua_setmetatable(L, -2);
 
+    if (global) {
+        lua_rawgetp(L, LUA_REGISTRYINDEX, &clib_registry);
+        lua_pushvalue(L, -2);
+        lua_rawsetp(L, -2, lib);
+        lua_pop(L, 1);
+    }
+
     return 1;
 }
 
@@ -2395,6 +2403,9 @@ int luaopen_ffi(lua_State *L)
 
     lua_newtable(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &ctdef_registry);
+
+    lua_newtable(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &clib_registry);
 
     createmetatable(L, CDATA_MT, cdata_methods);
     createmetatable(L, CTYPE_MT, ctype_methods);
