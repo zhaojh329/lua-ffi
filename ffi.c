@@ -1067,7 +1067,7 @@ static int cdata_index_common(lua_State *L, bool to)
     case CTYPE_RECORD:
         return cdata_index_crecord(L, cd, ct, to);
     case CTYPE_PTR:
-        if (ct->ptr->type == CTYPE_RECORD && lua_type(L, 2) == LUA_TSTRING)
+        if (ctype_ptr_to(ct, CTYPE_RECORD) && lua_type(L, 2) == LUA_TSTRING)
             return cdata_index_crecord(L, cd, ct->ptr, to);
         return cdata_index_ptr(L, cd, ct->ptr, to);
     case CTYPE_ARRAY:
