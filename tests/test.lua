@@ -151,6 +151,25 @@ local tests = {
 
         p[1] = 567
         assert(a[1] == 567)
+    end,
+    function()
+        local tp = ffi.metatype(ffi.typeof('struct Point'), {
+            __tostring = function(self)
+                return string.format('x:%d,y:%d', self.x, self.y)
+            end,
+            __index = {
+                add = function(self, x, y)
+                    self.x = self.x + x
+                    self.y = self.y + y
+                end
+            }
+        })
+
+        local p = ffi.new(tp, {45, 67})
+        assert(tostring(p) == 'x:45,y:67')
+
+        p:add(1, 1)
+        assert(p.x == 46 and p.y == 68)
     end
 }
 
