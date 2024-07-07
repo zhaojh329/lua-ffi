@@ -1015,7 +1015,7 @@ static struct crecord_field *cdata_crecord_find_field(
 
 static int cdata_index_crecord(lua_State *L, struct cdata *cd, struct ctype *ct, bool to)
 {
-    void *ptr = cdata_type(cd) == CTYPE_PTR ? cdata_ptr_ptr(cd) : cdata_ptr(cd);;
+    void *ptr = cdata_type(cd) == CTYPE_PTR ? cdata_ptr_ptr(cd) : cdata_ptr(cd);
     struct crecord_field *field;
     size_t offset = 0;
     const char *name;
