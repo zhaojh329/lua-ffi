@@ -53,6 +53,12 @@ ffi.cdef([[
         char name[0];
     };
 
+    typedef struct md5_ctx {
+        uint32_t lo, hi;
+        uint32_t a, b, c, d;
+        unsigned char buffer[64];
+    } md5_ctx_t;
+
     int printf(const char *format, ...);
     struct ComplexStruct *fun1();
     struct ComplexStruct *fun2(int a[]);

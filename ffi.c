@@ -1545,7 +1545,7 @@ static int cparse_record_field(lua_State *L, struct crecord_field **fields)
 
     while (true) {
         struct crecord_field *field;
-        struct ctype ct = {};
+        struct ctype bt = {}, ct;
         bool flexible = false;
         int array_size;
         char *name;
@@ -1556,16 +1556,20 @@ static int cparse_record_field(lua_State *L, struct crecord_field **fields)
             return nfield;
 
         if (cparse_check_tok(L, tok) == TOK_STRUCT || cparse_check_tok(L, tok) == TOK_UNION) {
-            tok = cparse_record(L, &ct, cparse_check_tok(L, tok) == TOK_UNION);
+            tok = cparse_record(L, &bt, cparse_check_tok(L, tok) == TOK_UNION);
             if (tok == ';') {
                 field = calloc(1, sizeof(struct crecord_field) + 1);
                 if (!field)
                     return luaL_error(L, "no mem");
+                ct = bt;
                 goto add;
             }
         } else {
-            tok = cparse_basetype(L, tok, &ct);
+            tok = cparse_basetype(L, tok, &bt);
         }
+
+again:
+        ct = bt;
 
         tok = cparse_pointer(L, tok, &ct);
 
@@ -1587,8 +1591,6 @@ static int cparse_record_field(lua_State *L, struct crecord_field **fields)
         memcpy(field->name, name, yyget_leng());
 
         tok = cparse_array(L, yylex(), &flexible, &array_size);
-        if (cparse_check_tok(L, tok) != ';')
-            return cparse_expected_error(L, tok, ";");
 
         if (array_size >= 0)
             cparse_new_array(L, array_size, &ct);
@@ -1596,6 +1598,14 @@ static int cparse_record_field(lua_State *L, struct crecord_field **fields)
 add:
         field->ct = ctype_lookup(L, &ct, false);
         fields[nfield++] = field;
+
+        if (cparse_check_tok(L, tok) == ',') {
+            tok = yylex();
+            goto again;
+        }
+
+        if (cparse_check_tok(L, tok) != ';')
+            return cparse_expected_error(L, tok, ";");
     }
 }
 
