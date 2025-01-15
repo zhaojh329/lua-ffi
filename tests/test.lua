@@ -44,6 +44,9 @@ ffi.cdef([[
 
 local tests = {
     function()
+        print(ffi.nullptr)
+    end,
+    function()
         local a = ffi.new('int [10]', {1, 2, 3})
         assert(a[0] == 1)
         assert(a[1] == 2)

@@ -417,6 +417,7 @@ static struct ctype *ctype_new(lua_State *L, bool keep)
     struct ctype *ct = lua_newuserdata(L, sizeof(struct ctype));
 
     ct->type = CTYPE_VOID;
+    ct->ft = &ffi_type_void;
     ct->is_const = false;
 
     luaL_getmetatable(L, CTYPE_MT);
@@ -2469,8 +2470,16 @@ static void createmetatable(lua_State *L, const char *name, const struct luaL_Re
 
 static void create_nullptr(lua_State *L)
 {
-    struct ctype *ct = ctype_new(L, false);
-    ctype_to_ptr(L, ct);
+    struct ctype match = {
+        .type = CTYPE_VOID,
+        .ft = &ffi_type_void
+    };
+    struct ctype *ct;
+
+    ctype_to_ptr(L, &match);
+
+    ct = ctype_lookup(L, &match, false);
+
     cdata_ptr_set(cdata_new(L, ct, NULL), NULL);
 }
 
