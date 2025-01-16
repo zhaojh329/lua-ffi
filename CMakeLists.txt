@@ -6,7 +6,7 @@ include(FindPkgConfig)
 
 # Version settings
 set(LUA_FFI_VERSION_MAJOR 1)
-set(LUA_FFI_VERSION_MINOR 0)
+set(LUA_FFI_VERSION_MINOR 1)
 set(LUA_FFI_VERSION_PATCH 0)
 
 # Define options for selecting Lua versions
