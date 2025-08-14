@@ -9,12 +9,14 @@
 [7]: https://img.shields.io/badge/release-1.1.0-blue.svg?style=plastic
 [8]: https://github.com/zhaojh329/lua-ffi/releases
 [9]: https://github.com/zhaojh329/lua-ffi/workflows/build/badge.svg
+[10]: https://img.shields.io/github/downloads/zhaojh329/lua-ffi/total
 
 [![license][1]][2]
 [![PRs Welcome][3]][4]
 [![Issue Welcome][5]][6]
 [![Release Version][7]][8]
 ![Build Status][9]
+![Downloads][10]
 ![visitors](https://visitor-badge.laobi.icu/badge?page_id=zhaojh329.lua-ffi)
 
 [LuaJIT]: https://luajit.org/
