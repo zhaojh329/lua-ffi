@@ -2362,14 +2362,8 @@ static int lua_ffi_string(lua_State *L)
         goto converr;
     }
 
-    switch (ct->type) {
-    case CTYPE_VOID:
-    case CTYPE_CHAR:
-    case CTYPE_UCHAR:
-        break;
-    default:
+    if (ct->type != CTYPE_CHAR)
         goto converr;
-    }
 
     if (array && array->size) {
         char *p = memchr(ptr, '\0', array->ft.size);
