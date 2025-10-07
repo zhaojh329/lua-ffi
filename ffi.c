@@ -847,6 +847,7 @@ static bool cdata_from_lua_cdata(lua_State *L, struct ctype *ct, void *ptr, int 
 
 static bool cdata_from_lua_table(lua_State *L, struct ctype *ct, void *ptr, int idx, bool cast)
 {
+    const uint8_t *sptr = (const uint8_t *)ptr;
     int i = 0;
 
     if (ct->type == CTYPE_ARRAY) {
@@ -856,7 +857,7 @@ static bool cdata_from_lua_table(lua_State *L, struct ctype *ct, void *ptr, int 
                 lua_pop(L, 1);
                 break;
             }
-            cdata_from_lua(L, ct->array->ct, ptr + ctype_sizeof(ct->array->ct) * i++, lua_absindex(L, -1), cast);
+            cdata_from_lua(L, ct->array->ct, (void *)(sptr + ctype_sizeof(ct->array->ct) * i++), lua_absindex(L, -1), cast);
             lua_pop(L, 1);
         }
         return true;
@@ -871,7 +872,7 @@ static bool cdata_from_lua_table(lua_State *L, struct ctype *ct, void *ptr, int 
             }
 
             if (!lua_isnil(L, -1))
-                cdata_from_lua(L, field->ct, ptr + field->offset, lua_absindex(L, -1), cast);
+                cdata_from_lua(L, field->ct, (void *)(sptr + field->offset), lua_absindex(L, -1), cast);
             lua_pop(L, 1);
         }
         return true;
@@ -968,7 +969,7 @@ static int cdata_from_lua(lua_State *L, struct ctype *ct, void *ptr, int idx, bo
 
 static int cdata_index_ptr(lua_State *L, struct cdata *cd, struct ctype *ct, bool to)
 {
-    void *ptr = cdata_type(cd) == CTYPE_PTR ? cdata_ptr_ptr(cd) : cdata_ptr(cd);
+    const uint8_t *sptr = (const uint8_t *)(cdata_type(cd) == CTYPE_PTR ? cdata_ptr_ptr(cd) : cdata_ptr(cd));
     int idx;
 
     if (ct->type == CTYPE_VOID) {
@@ -992,7 +993,7 @@ static int cdata_index_ptr(lua_State *L, struct cdata *cd, struct ctype *ct, boo
         }
         lua_pop(L, 2);
 
-        cdata_to_lua(L, ct, ptr + ctype_sizeof(ct) * idx);
+        cdata_to_lua(L, ct, (void *)(sptr + ctype_sizeof(ct) * idx));
 
         if (luaL_testudata(L, -1, CDATA_MT)) {
             lua_rawgetp(L, LUA_REGISTRYINDEX, cd);
@@ -1002,7 +1003,7 @@ static int cdata_index_ptr(lua_State *L, struct cdata *cd, struct ctype *ct, boo
         }
         return 1;
     } else {
-        return cdata_from_lua(L, ct, ptr + ctype_sizeof(ct) * idx, 3, false);
+        return cdata_from_lua(L, ct, (void *)(sptr + ctype_sizeof(ct) * idx), 3, false);
     }
 }
 
@@ -1033,7 +1034,7 @@ static struct crecord_field *cdata_crecord_find_field(
 
 static int cdata_index_crecord(lua_State *L, struct cdata *cd, struct ctype *ct, bool to)
 {
-    void *ptr = cdata_type(cd) == CTYPE_PTR ? cdata_ptr_ptr(cd) : cdata_ptr(cd);
+    const uint8_t *sptr = (const uint8_t *)(cdata_type(cd) == CTYPE_PTR ? cdata_ptr_ptr(cd) : cdata_ptr(cd));
     struct crecord *rc = ct->rc;
     struct crecord_field *field;
     size_t offset = 0;
@@ -1077,7 +1078,7 @@ static int cdata_index_crecord(lua_State *L, struct cdata *cd, struct ctype *ct,
     }
 
     if (to) {
-        cdata_to_lua(L, field->ct, ptr + offset);
+        cdata_to_lua(L, field->ct, (void *)(sptr + offset));
         if (luaL_testudata(L, -1, CDATA_MT)) {
             lua_rawgetp(L, LUA_REGISTRYINDEX, cd);
             lua_pushvalue(L, -2);
@@ -1086,7 +1087,7 @@ static int cdata_index_crecord(lua_State *L, struct cdata *cd, struct ctype *ct,
         }
         return 1;
     } else {
-        return cdata_from_lua(L, field->ct, ptr + offset, 3, false);
+        return cdata_from_lua(L, field->ct, (void *)(sptr + offset), 3, false);
     }
 }
 
