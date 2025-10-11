@@ -175,6 +175,13 @@ local tests = {
 
         p:add(1, 1)
         assert(p.x == 46 and p.y == 68)
+    end,
+    function()
+        local a = ffi.new('int [10]', { [5] = 5, 1, 2 })
+        assert(a[0] == 1)
+        assert(a[1] == 2)
+        assert(a[4] == 5)
+        assert(a[5] == 0)
     end
 }
 

@@ -850,14 +850,18 @@ static bool cdata_from_lua_table(lua_State *L, struct ctype *ct, void *ptr, int 
     int i = 0;
 
     if (ct->type == CTYPE_ARRAY) {
-        while (i < ct->array->size) {
-            lua_rawgeti(L, idx, i + 1);
-            if (!lua_isnil(L, -1))
-                cdata_from_lua(L, ct->array->ct, ptr + ctype_sizeof(ct->array->ct) * i,
-                        lua_absindex(L, -1), cast);
-            i++;
+        lua_pushnil(L);
+
+        while (lua_next(L, idx)) {
+            if (lua_isinteger(L, -2)) {
+                i = lua_tointeger(L, -2) - 1;
+                if (i < ct->array->size)
+                    cdata_from_lua(L, ct->array->ct, ptr + ctype_sizeof(ct->array->ct) * i,
+                            lua_absindex(L, -1), cast);
+            }
             lua_pop(L, 1);
         }
+
         return true;
     } else if (ct->type == CTYPE_RECORD) {
         while (i < ct->rc->nfield) {
