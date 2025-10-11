@@ -852,11 +852,10 @@ static bool cdata_from_lua_table(lua_State *L, struct ctype *ct, void *ptr, int 
     if (ct->type == CTYPE_ARRAY) {
         while (i < ct->array->size) {
             lua_rawgeti(L, idx, i + 1);
-            if (lua_isnil(L, -1)) {
-                lua_pop(L, 1);
-                break;
-            }
-            cdata_from_lua(L, ct->array->ct, ptr + ctype_sizeof(ct->array->ct) * i++, lua_absindex(L, -1), cast);
+            if (!lua_isnil(L, -1))
+                cdata_from_lua(L, ct->array->ct, ptr + ctype_sizeof(ct->array->ct) * i,
+                        lua_absindex(L, -1), cast);
+            i++;
             lua_pop(L, 1);
         }
         return true;
