@@ -181,7 +181,12 @@ local tests = {
         assert(a[0] == 1)
         assert(a[1] == 2)
         assert(a[4] == 5)
-        assert(a[5] == 0)
+
+        assert(#a == 10)
+
+        for i = 5, #a - 1 do
+            assert(a[i] == 0)
+        end
     end
 }
 

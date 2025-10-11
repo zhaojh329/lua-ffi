@@ -1295,6 +1295,20 @@ static int cdata_call(lua_State *L)
     return luaL_error(L, "unsupported return type '%s'", ctype_name(rtype));
 }
 
+static int cdata_len(lua_State *L)
+{
+    struct cdata *cd = luaL_checkudata(L, 1, CDATA_MT);
+
+    if (cd->ct->type != CTYPE_ARRAY) {
+        __ctype_tostring(L, cd->ct);
+        return luaL_error(L, "attempt to get length of non-array cdata<%s>", lua_tostring(L, -1));
+    }
+
+    lua_pushinteger(L, cd->ct->array->size);
+
+    return 1;
+}
+
 static int cdata_gc(lua_State *L)
 {
     struct cdata *cd = luaL_checkudata(L, 1, CDATA_MT);
@@ -1320,6 +1334,7 @@ static const luaL_Reg cdata_methods[] = {
     {"__newindex", cdata_newindex},
     {"__eq", cdata_eq},
     {"__call", cdata_call},
+    {"__len", cdata_len},
     {"__gc", cdata_gc},
     {NULL, NULL}
 };
