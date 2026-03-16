@@ -122,6 +122,7 @@ struct crecord {
     uint8_t nfield:5;
     uint8_t is_union:1;
     uint8_t anonymous:1;
+    uint8_t packed:1;
     struct crecord_field *fields[0];
 };
 
@@ -1520,6 +1521,42 @@ static int cparse_array(lua_State *L, int tok, bool *flexible, int *size)
     return yylex();
 }
 
+static int cparse_packed_attribute(lua_State *L, int tok, bool *is_packed)
+{
+    while (cparse_check_tok(L, tok) == TOK_NAME && !strcmp(yyget_text(), "__attribute__")) {
+        int depth = 2;
+
+        tok = yylex();
+        if (cparse_check_tok(L, tok) != '(')
+            return cparse_expected_error(L, tok, "(");
+
+        tok = yylex();
+        if (cparse_check_tok(L, tok) != '(')
+            return cparse_expected_error(L, tok, "(");
+
+        tok = yylex();
+
+        while (depth > 0) {
+            if (!cparse_check_tok(L, tok))
+                return luaL_error(L, "%d:unterminated __attribute__", yyget_lineno());
+
+            if (tok == TOK_NAME && depth == 2
+                    && (!strcmp(yyget_text(), "packed") || !strcmp(yyget_text(), "__packed__"))) {
+                *is_packed = true;
+            }
+
+            if (tok == '(')
+                depth++;
+            else if (tok == ')')
+                depth--;
+
+            tok = yylex();
+        }
+    }
+
+    return tok;
+}
+
 static int cparse_basetype(lua_State *L, int tok, struct ctype *ct);
 
 static void init_ft_struct(lua_State *L, ffi_type *ft, ffi_type **elements, size_t *offsets)
@@ -1633,12 +1670,47 @@ static inline bool ctype_is_zero_array(struct ctype *ct)
     return ct->type == CTYPE_ARRAY && ct->array->size == 0;
 }
 
+static void cparse_record_packed_layout(struct crecord *rc)
+{
+    size_t size = 0;
+    int i;
+
+    rc->ft.type = FFI_TYPE_STRUCT;
+    rc->ft.alignment = 1;
+
+    if (rc->is_union) {
+        for (i = 0; i < rc->nfield; i++) {
+            size_t field_size = ctype_sizeof(rc->fields[i]->ct);
+
+            rc->fields[i]->offset = 0;
+
+            if (field_size > size)
+                size = field_size;
+        }
+
+        rc->ft.size = size;
+        return;
+    }
+
+    for (i = 0; i < rc->nfield; i++) {
+        rc->fields[i]->offset = size;
+
+        if (!ctype_is_zero_array(rc->fields[i]->ct))
+            size += ctype_sizeof(rc->fields[i]->ct);
+    }
+
+    rc->ft.size = size;
+}
+
 static int cparse_record(lua_State *L, struct ctype *ct, bool is_union)
 {
     bool named = false;
+    bool packed = false;
     int tok = yylex();
 
     ct->type = CTYPE_RECORD;
+
+    tok = cparse_packed_attribute(L, tok, &packed);
 
     if (cparse_check_tok(L, tok) == TOK_NAME) {
         named = true;
@@ -1646,12 +1718,14 @@ static int cparse_record(lua_State *L, struct ctype *ct, bool is_union)
         tok = yylex();
     }
 
+    tok = cparse_packed_attribute(L, tok, &packed);
+
     if (cparse_check_tok(L, tok) == '{') {
         struct crecord_field *fields[MAX_RECORD_FIELDS];
         size_t offsets[MAX_RECORD_FIELDS];
         ffi_type **elements;
         size_t nfield = 0;
-        int i, j, nelement;
+        int i, j, nelement, next_tok;
 
         if (named) {
             lua_rawgetp(L, LUA_REGISTRYINDEX, &crecord_registry);
@@ -1664,6 +1738,7 @@ static int cparse_record(lua_State *L, struct ctype *ct, bool is_union)
         }
 
         nfield = cparse_record_field(L, fields);
+        next_tok = cparse_packed_attribute(L, yylex(), &packed);
 
         if (is_union) {
             nelement = 2;
@@ -1697,6 +1772,7 @@ static int cparse_record(lua_State *L, struct ctype *ct, bool is_union)
 
         ct->rc->is_union = is_union;
         ct->rc->nfield = nfield;
+        ct->rc->packed = packed;
 
         elements = (ffi_type **)&ct->rc->fields[nfield];
 
@@ -1719,21 +1795,28 @@ static int cparse_record(lua_State *L, struct ctype *ct, bool is_union)
             }
         }
 
-        if (nelement > 1)
-            init_ft_struct(L, &ct->rc->ft, elements, offsets);
+        ct->rc->ft.type = FFI_TYPE_STRUCT;
+        ct->rc->ft.elements = elements;
 
-        if (!is_union) {
-            for (i = 0, j = 0; i < nfield; i++) {
-                if (ctype_is_zero_array(fields[i]->ct)) {
-                    if (i > 0)
-                        ct->rc->fields[i]->offset = fields[i - 1]->offset + ctype_sizeof(fields[i - 1]->ct);
-                } else {
-                    ct->rc->fields[i]->offset = offsets[j++];
+        if (packed) {
+            cparse_record_packed_layout(ct->rc);
+        } else {
+            if (nelement > 1)
+                init_ft_struct(L, &ct->rc->ft, elements, offsets);
+
+            if (!is_union) {
+                for (i = 0, j = 0; i < nfield; i++) {
+                    if (ctype_is_zero_array(fields[i]->ct)) {
+                        if (i > 0)
+                            ct->rc->fields[i]->offset = fields[i - 1]->offset + ctype_sizeof(fields[i - 1]->ct);
+                    } else {
+                        ct->rc->fields[i]->offset = offsets[j++];
+                    }
                 }
             }
         }
 
-        return yylex();
+        return next_tok;
     } else {
         if (!named)
             return cparse_expected_error(L, tok, "identifier");

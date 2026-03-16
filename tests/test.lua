@@ -106,6 +106,25 @@ local tests = {
         assert(an.d == 4)
     end,
     function()
+        ffi.cdef([[
+            struct packed_demo {
+                char c;
+                int i;
+            } __attribute__((packed));
+
+            struct normal_demo {
+                char c;
+                int i;
+            };
+        ]])
+
+        assert(ffi.sizeof('struct packed_demo') == 5)
+        assert(ffi.sizeof('struct normal_demo') == 8)
+
+        assert(ffi.offsetof('struct packed_demo', 'i') == 1)
+        assert(ffi.offsetof('struct normal_demo', 'i') == 4)
+    end,
+    function()
         local buf = ffi.gc(ffi.C.malloc(128), ffi.C.free)
         local str = ffi.cast('const char *', buf)
 
