@@ -35,3 +35,33 @@ int *pass_array(int a[])
 {
     return a;
 }
+
+int cb_mul10(int i)
+{
+    return i * 10;
+}
+
+int call_f0(int (*cb)(int))
+{
+    return cb(20);
+}
+
+int call_f1(int (*cb)(int), int x)
+{
+    return cb(x);
+}
+
+int call_f2(int (*cb)(int i), int x)
+{
+    return cb(x);
+}
+
+int call_f3(int x, int (*cb)(int i))
+{
+    return cb(x);
+}
+
+int call_f4(int x, int (*cb)(int i))
+{
+    return cb(x);
+}

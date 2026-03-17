@@ -13,6 +13,7 @@
 #include <string.h>
 #include <alloca.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <dlfcn.h>
 #include <math.h>
 #include <ffi.h>
@@ -133,10 +134,24 @@ struct cfunc {
     struct ctype *args[0];
 };
 
+struct ccallback {
+    lua_State *L;
+    struct cfunc *func;
+    ffi_cif cif;
+    ffi_type *args[MAX_FUNC_ARGS];
+    ffi_closure *closure;
+    void *code;
+    int fn_ref;
+    int err_ref;
+};
+
+static bool ctype_equal(const struct ctype *ct1, const struct ctype *ct2);
+
 struct cdata {
     struct ctype *ct;
     int gc_ref;
     void *ptr;
+    struct ccallback *cb;
 };
 
 struct clib {
@@ -436,6 +451,23 @@ static struct ctype *ctype_new(lua_State *L, bool keep)
     return ct;
 }
 
+static bool cfunc_equal(const struct cfunc *f1, const struct cfunc *f2)
+{
+    int i;
+
+    if (f1->va != f2->va || f1->narg != f2->narg)
+        return false;
+
+    if (!ctype_equal(f1->rtype, f2->rtype))
+        return false;
+
+    for (i = 0; i < f1->narg; i++)
+        if (!ctype_equal(f1->args[i], f2->args[i]))
+            return false;
+
+    return true;
+}
+
 static bool ctype_equal(const struct ctype *ct1, const struct ctype *ct2)
 {
     if (ct1->type != ct2->type)
@@ -454,7 +486,7 @@ static bool ctype_equal(const struct ctype *ct1, const struct ctype *ct2)
     case CTYPE_PTR:
         return ctype_equal(ct1->ptr, ct2->ptr);
     case CTYPE_FUNC:
-        return false;
+        return cfunc_equal(ct1->func, ct2->func);
     default:
         break;
     }
@@ -598,6 +630,7 @@ static struct cdata *cdata_new(lua_State *L, struct ctype *ct, void *ptr)
     cd->gc_ref = LUA_REFNIL;
     cd->ptr = ptr;
     cd->ct = ct;
+    cd->cb = NULL;
 
     luaL_getmetatable(L, CDATA_MT);
     lua_setmetatable(L, -2);
@@ -822,6 +855,13 @@ static bool cdata_from_lua_cdata(lua_State *L, struct ctype *ct, void *ptr, int 
         return cdata_from_lua_cdata_ptr(L, ct, ptr, cd->ct->array->ct, cdata_ptr(cd), cast);
     case CTYPE_PTR:
         return cdata_from_lua_cdata_ptr(L, ct, ptr, cd->ct->ptr, cdata_ptr_ptr(cd), cast);
+    case CTYPE_FUNC:
+        if (ct->type == CTYPE_PTR && ct->ptr->type == CTYPE_FUNC
+                && (cast || ctype_equal(ct->ptr, cd->ct))) {
+            *(void **)ptr = cdata_ptr_ptr(cd);
+            return true;
+        }
+        break;
     case CTYPE_RECORD:
         if (ct->type == CTYPE_PTR && (cast || ctype_equal(cd->ct, ct->ptr))) {
             *(void **)ptr = cdata_ptr(cd);
@@ -844,6 +884,221 @@ static bool cdata_from_lua_cdata(lua_State *L, struct ctype *ct, void *ptr, int 
     }
 
     return false;
+}
+
+static bool cdata_from_lua_cb_ret(lua_State *L, struct ctype *ct, void *ptr, int idx)
+{
+    struct cdata *cd;
+
+    switch (lua_type(L, idx)) {
+    case LUA_TNIL:
+        if (ct->type == CTYPE_PTR) {
+            *(void **)ptr = NULL;
+            return true;
+        }
+        break;
+    case LUA_TNUMBER:
+    case LUA_TBOOLEAN:
+        if (ctype_is_num(ct)) {
+            ft_from_lua_num(L, ct->ft, ptr, idx);
+            if (ct->type == CTYPE_BOOL)
+                *(int8_t *)ptr = !!*(int8_t *)ptr;
+            return true;
+        }
+        break;
+    case LUA_TSTRING:
+        if ((ctype_ptr_to(ct, CTYPE_CHAR) || ctype_ptr_to(ct, CTYPE_VOID))
+            && ct->type == CTYPE_PTR && ct->ptr->is_const) {
+            *(const char **)ptr = (const char *)lua_tostring(L, idx);
+            return true;
+        }
+        break;
+    case LUA_TLIGHTUSERDATA:
+        if (ct->type == CTYPE_PTR) {
+            *(void **)ptr = lua_touserdata(L, idx);
+            return true;
+        }
+        break;
+    case LUA_TUSERDATA:
+        cd = luaL_testudata(L, idx, CDATA_MT);
+        if (!cd)
+            break;
+
+        switch (cdata_type(cd)) {
+        case CTYPE_ARRAY:
+            if (ct->type == CTYPE_PTR && (ctype_equal(ct->ptr, cd->ct->array->ct)
+                    || ctype_ptr_to(ct, CTYPE_VOID) || cd->ct->array->ct->type == CTYPE_VOID)) {
+                *(void **)ptr = cdata_ptr(cd);
+                return true;
+            }
+            break;
+        case CTYPE_PTR:
+            if (ct->type == CTYPE_PTR && (ctype_equal(ct->ptr, cd->ct->ptr)
+                    || ctype_ptr_to(ct, CTYPE_VOID) || cd->ct->ptr->type == CTYPE_VOID)) {
+                *(void **)ptr = cdata_ptr_ptr(cd);
+                return true;
+            }
+            break;
+        case CTYPE_FUNC:
+            if (ct->type == CTYPE_PTR && ct->ptr->type == CTYPE_FUNC
+                    && ctype_equal(ct->ptr, cd->ct)) {
+                *(void **)ptr = cdata_ptr_ptr(cd);
+                return true;
+            }
+            break;
+        case CTYPE_RECORD:
+            if (ct->type == CTYPE_PTR && ctype_equal(cd->ct, ct->ptr)) {
+                *(void **)ptr = cdata_ptr(cd);
+                return true;
+            }
+
+            if (ctype_equal(cd->ct, ct)) {
+                memcpy(ptr, cdata_ptr(cd), ctype_sizeof(ct));
+                return true;
+            }
+            break;
+        default:
+            if (ctype_is_num(cd->ct) && ctype_is_num(ct)) {
+                cdata_to_lua(L, cd->ct, cdata_ptr(cd));
+                ft_from_lua_num(L, ct->ft, ptr, -1);
+                if (ct->type == CTYPE_BOOL)
+                    *(int8_t *)ptr = !!*(int8_t *)ptr;
+                lua_pop(L, 1);
+                return true;
+            }
+            break;
+        }
+        break;
+    default:
+        break;
+    }
+
+    return false;
+}
+
+static void ccallback_set_error(lua_State *L, struct ccallback *cb, int idx)
+{
+    if (cb->err_ref != LUA_REFNIL) {
+        luaL_unref(L, LUA_REGISTRYINDEX, cb->err_ref);
+        cb->err_ref = LUA_REFNIL;
+    }
+
+    lua_pushvalue(L, idx);
+    cb->err_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+}
+
+static void ccallback_raise_argument_errors(lua_State *L, int first_idx, int narg)
+{
+    int i;
+
+    for (i = 0; i < narg; i++) {
+        struct cdata *cd = luaL_testudata(L, first_idx + i, CDATA_MT);
+
+        if (!cd || !cd->cb || cd->cb->err_ref == LUA_REFNIL)
+            continue;
+
+        lua_rawgeti(L, LUA_REGISTRYINDEX, cd->cb->err_ref);
+        luaL_unref(L, LUA_REGISTRYINDEX, cd->cb->err_ref);
+        cd->cb->err_ref = LUA_REFNIL;
+        lua_error(L);
+    }
+}
+
+static void ccallback_invoke(ffi_cif *cif, void *ret, void **args, void *userdata)
+{
+    struct ccallback *cb = userdata;
+    struct cfunc *func = cb->func;
+    struct ctype *rtype = func->rtype;
+    lua_State *L = cb->L;
+    int top = lua_gettop(L);
+    int i;
+
+    lua_rawgeti(L, LUA_REGISTRYINDEX, cb->fn_ref);
+
+    for (i = 0; i < func->narg; i++)
+        cdata_to_lua(L, func->args[i], args[i]);
+
+    if (lua_pcall(L, func->narg, rtype->type == CTYPE_VOID ? 0 : 1, 0)) {
+        if (lua_isnil(L, -1)) {
+            lua_pushliteral(L, "unknown");
+            ccallback_set_error(L, cb, -1);
+        } else {
+            ccallback_set_error(L, cb, -1);
+        }
+
+        if (rtype->type != CTYPE_VOID)
+            memset(ret, 0, ctype_sizeof(rtype));
+
+        lua_settop(L, top);
+        return;
+    }
+
+    if (rtype->type != CTYPE_VOID && !cdata_from_lua_cb_ret(L, rtype, ret, -1)) {
+        lua_pushliteral(L, "callback return value conversion failed");
+        ccallback_set_error(L, cb, -1);
+        memset(ret, 0, ctype_sizeof(rtype));
+    }
+
+    lua_settop(L, top);
+}
+
+static void ccallback_release(lua_State *L, struct ccallback *cb)
+{
+    if (!cb)
+        return;
+
+    if (cb->fn_ref != LUA_REFNIL)
+        luaL_unref(L, LUA_REGISTRYINDEX, cb->fn_ref);
+
+    if (cb->closure)
+        ffi_closure_free(cb->closure);
+
+    free(cb);
+}
+
+static struct ccallback *ccallback_new(lua_State *L, struct cfunc *func, int idx)
+{
+    struct ccallback *cb;
+    int status;
+    int i;
+
+    if (func->va)
+        luaL_error(L, "cannot create callback for variadic function type");
+
+    cb = calloc(1, sizeof(struct ccallback));
+    if (!cb)
+        luaL_error(L, "no mem");
+
+    cb->L = L;
+    cb->func = func;
+    cb->fn_ref = LUA_REFNIL;
+    cb->err_ref = LUA_REFNIL;
+
+    lua_pushvalue(L, idx);
+    cb->fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+    for (i = 0; i < func->narg; i++)
+        cb->args[i] = ctype_ft(func->args[i]);
+
+    status = ffi_prep_cif(&cb->cif, FFI_DEFAULT_ABI, func->narg,
+            ctype_ft(func->rtype), cb->args);
+    if (status)
+        goto err;
+
+    cb->closure = ffi_closure_alloc(sizeof(ffi_closure), &cb->code);
+    if (!cb->closure)
+        goto err;
+
+    status = ffi_prep_closure_loc(cb->closure, &cb->cif, ccallback_invoke, cb, cb->code);
+    if (status)
+        goto err;
+
+    return cb;
+
+err:
+    ccallback_release(L, cb);
+    luaL_error(L, "ffi callback setup fail: %d", status);
+    return NULL;
 }
 
 static bool cdata_from_lua_table(lua_State *L, struct ctype *ct, void *ptr, int idx, bool cast)
@@ -953,6 +1208,10 @@ static int cdata_from_lua(lua_State *L, struct ctype *ct, void *ptr, int idx, bo
     case LUA_TTABLE:
         if (cdata_from_lua_table(L, ct, ptr, idx, cast))
             return 0;
+        break;
+    case LUA_TFUNCTION:
+        if (cast && ct->type == CTYPE_PTR && ct->ptr->type == CTYPE_FUNC)
+            return luaL_argerror(L, idx, "cast callback with ffi.cast so callback lifetime can be tracked");
         break;
     default:
         break;
@@ -1203,6 +1462,9 @@ static int cdata_call(lua_State *L)
     }
 
     sym = cdata_ptr_ptr(cd);
+    if (!sym)
+        return luaL_error(L, "attempt to call null function pointer");
+
     func = ct->func;
     rtype = func->rtype;
 
@@ -1273,10 +1535,12 @@ static int cdata_call(lua_State *L)
         if (rtype->type == CTYPE_PTR) {
             void *rvalue;
             ffi_call(&cif, FFI_FN(sym), &rvalue, values);
+            ccallback_raise_argument_errors(L, 2, narg);
             cdata_ptr_set(cdata_new(L, rtype, NULL), rvalue);
         } else {
             cd = cdata_new(L, rtype, NULL);
             ffi_call(&cif, FFI_FN(sym), cdata_ptr(cd), values);
+            ccallback_raise_argument_errors(L, 2, narg);
         }
 
         return 1;
@@ -1289,6 +1553,7 @@ static int cdata_call(lua_State *L)
             rvalue = alloca(ctype_sizeof(rtype));
 
         ffi_call(&cif, FFI_FN(sym), rvalue, values);
+        ccallback_raise_argument_errors(L, 2, narg);
 
         return cdata_to_lua(L, rtype, rvalue);
     }
@@ -1321,6 +1586,11 @@ static int cdata_gc(lua_State *L)
         if (lua_pcall(L, 1, 0, 0))
             lua_pop(L, 1);
         luaL_unref(L, LUA_REGISTRYINDEX, gc_ref);
+    }
+
+    if (cd->cb) {
+        ccallback_release(L, cd->cb);
+        cd->cb = NULL;
     }
 
     lua_pushnil(L);
@@ -2006,11 +2276,166 @@ static int cparse_basetype(lua_State *L, int tok, struct ctype *ct)
     return tok;
 }
 
+static void cparse_build_func_type(lua_State *L, struct ctype *rtype,
+        struct ctype *args, int narg, bool va, struct ctype *out)
+{
+    struct cfunc *func;
+    int i;
+
+    func = calloc(1, sizeof(struct cfunc) + sizeof(struct ctype *) * narg);
+    if (!func)
+        luaL_error(L, "no mem");
+
+    func->narg = narg;
+    func->va = va;
+
+    for (i = 0; i < narg; i++)
+        func->args[i] = ctype_lookup(L, &args[i], false);
+
+    func->rtype = ctype_lookup(L, rtype, false);
+
+    out->type = CTYPE_FUNC;
+    out->is_const = false;
+    out->func = func;
+}
+
+static int cparse_function_args(lua_State *L, int tok, struct ctype *args,
+        int *narg, bool *va);
+
+static int cparse_function_arg(lua_State *L, int tok, struct ctype *ct, char **name)
+{
+    bool flexible = true;
+    int array_size;
+
+    if (name)
+        *name = NULL;
+
+    if (cparse_check_tok(L, tok) == '(') {
+        struct ctype fargs[MAX_FUNC_ARGS] = {};
+        struct ctype fct;
+        int fnarg = 0;
+        int ptr_depth = 0;
+        bool ptr_const = false;
+        bool fva = false;
+
+        tok = yylex();
+
+        while (cparse_check_tok(L, tok) == '*') {
+            ptr_depth++;
+            tok = yylex();
+        }
+
+        if (ptr_depth == 0)
+            return cparse_expected_error(L, tok, "*");
+
+        if (cparse_check_tok(L, tok) == TOK_CONST) {
+            ptr_const = true;
+            tok = yylex();
+        }
+
+        if (cparse_check_tok(L, tok) == TOK_NAME) {
+            if (name) {
+                *name = strdup(yyget_text());
+                if (!*name)
+                    luaL_error(L, "no mem");
+            }
+            tok = yylex();
+        }
+
+        if (cparse_check_tok(L, tok) != ')')
+            return cparse_expected_error(L, tok, ")");
+
+        tok = yylex();
+        if (cparse_check_tok(L, tok) != '(')
+            return cparse_expected_error(L, tok, "(");
+
+        tok = cparse_function_args(L, tok, fargs, &fnarg, &fva);
+
+        cparse_build_func_type(L, ct, fargs, fnarg, fva, &fct);
+        *ct = fct;
+
+        while (ptr_depth-- > 0)
+            ctype_to_ptr(L, ct);
+
+        if (ptr_const && ct->type == CTYPE_PTR)
+            ct->is_const = true;
+
+        tok = yylex();
+
+        return tok;
+    }
+
+    tok = cparse_pointer(L, tok, ct);
+
+    if (cparse_check_tok(L, tok) == TOK_NAME) {
+        if (name) {
+            *name = strdup(yyget_text());
+            if (!*name)
+                luaL_error(L, "no mem");
+        }
+        tok = yylex();
+    }
+
+    tok = cparse_array(L, tok, &flexible, &array_size);
+
+    if (flexible || array_size >= 0)
+        ctype_to_ptr(L, ct);
+
+    return tok;
+}
+
+static int cparse_function_args(lua_State *L, int tok, struct ctype *args,
+        int *narg, bool *va)
+{
+    *narg = 0;
+    *va = false;
+
+    while (true) {
+        tok = yylex();
+        if (cparse_check_tok(L, tok) == ')')
+            break;
+
+        if (*narg >= MAX_FUNC_ARGS)
+            return luaL_error(L, "%d:too many arguments", yyget_lineno());
+
+        if (cparse_check_tok(L, tok) == TOK_STRUCT || cparse_check_tok(L, tok) == TOK_UNION) {
+            tok = cparse_record(L, &args[*narg], cparse_check_tok(L, tok) == TOK_UNION);
+        } else if (cparse_check_tok(L, tok) == TOK_VAL) {
+            tok = yylex();
+            if (cparse_check_tok(L, tok) != ')')
+                return cparse_expected_error(L, tok, ")");
+            *va = true;
+            break;
+        } else {
+            tok = cparse_basetype(L, tok, &args[*narg]);
+        }
+
+        tok = cparse_function_arg(L, tok, &args[*narg], NULL);
+
+        if (cparse_check_tok(L, tok) == ')') {
+            if (args[*narg].type == CTYPE_VOID && *narg == 0)
+                break;
+
+            check_void_forbidden(L, &args[*narg], tok);
+            (*narg)++;
+            break;
+        }
+
+        check_void_forbidden(L, &args[*narg], tok);
+        (*narg)++;
+
+        if (cparse_check_tok(L, tok) != ',')
+            return cparse_expected_error(L, tok, ",");
+    }
+
+    return tok;
+}
+
 static int cparse_function(lua_State *L, int tok, struct ctype *rtype)
 {
     struct ctype args[MAX_FUNC_ARGS] = {};
-    struct cfunc *func;
-    int i, narg = 0;
+    struct ctype fct;
+    int narg = 0;
     bool va = false;
 
     tok = cparse_pointer(L, tok, rtype);
@@ -2034,68 +2459,16 @@ static int cparse_function(lua_State *L, int tok, struct ctype *rtype)
     if (cparse_check_tok(L, tok) != '(')
         return cparse_expected_error(L, tok, "(");
 
-    while (true) {
-        bool flexible = true;
-        int array_size;
-
-        tok = yylex();
-        if (cparse_check_tok(L, tok) == ')')
-            break;
-
-        if (cparse_check_tok(L, tok) == TOK_STRUCT || cparse_check_tok(L, tok) == TOK_UNION) {
-            tok = cparse_record(L, &args[narg], cparse_check_tok(L, tok) == TOK_UNION);
-        } else if (cparse_check_tok(L, tok) == TOK_VAL) {
-            tok = yylex();
-            if (cparse_check_tok(L, tok) != ')')
-                return cparse_expected_error(L, tok, ")");
-            va = true;
-            break;
-        } else {
-            tok = cparse_basetype(L, tok, &args[narg]);
-        }
-
-        tok = cparse_pointer(L, tok, &args[narg]);
-
-        if (cparse_check_tok(L, tok) != ')')
-            check_void_forbidden(L, &args[narg], tok);
-        else
-            break;
-
-        if (cparse_check_tok(L, tok) == TOK_NAME)
-            tok = yylex();
-
-        tok = cparse_array(L, tok, &flexible, &array_size);
-
-        if (flexible || array_size >= 0)
-            ctype_to_ptr(L, &args[narg]);
-
-        narg++;
-
-        if (cparse_check_tok(L, tok) == ')')
-            break;
-
-        if (cparse_check_tok(L, tok) != ',')
-            return cparse_expected_error(L, tok, ",");
-    }
+    tok = cparse_function_args(L, tok, args, &narg, &va);
 
     tok = yylex();
     if (cparse_check_tok(L, tok) != ';')
         return cparse_expected_error(L, tok, ";");
 
-    func = calloc(1, sizeof(struct cfunc) + sizeof(struct ctype *) * narg);
-    if (!func)
-        return luaL_error(L, "no mem");
-
-    func->narg = narg;
-    func->va = va;
-
-    for (i = 0;  i < narg; i++)
-        func->args[i] = ctype_lookup(L, &args[i], false);
-
-    func->rtype = ctype_lookup(L, rtype, false);
+    cparse_build_func_type(L, rtype, args, narg, va, &fct);
 
     lua_pushvalue(L, -2);
-    lua_pushlightuserdata(L, func);
+    lua_pushlightuserdata(L, fct.func);
     lua_settable(L, -3);
     lua_pop(L, 2);
 
@@ -2130,27 +2503,40 @@ static int lua_ffi_cdef(lua_State *L)
         tok = cparse_basetype(L, tok, &ct);
 
         if (tdef) {
-            const char *name;
+            char *name = NULL;
 
-            tok = cparse_pointer(L, tok, &ct);
+            if (cparse_check_tok(L, tok) == '(') {
+                tok = cparse_function_arg(L, tok, &ct, &name);
+            } else {
+                tok = cparse_pointer(L, tok, &ct);
 
-            if (cparse_check_tok(L, tok) != TOK_NAME)
+                if (cparse_check_tok(L, tok) != TOK_NAME)
+                    return cparse_expected_error(L, tok, "identifier");
+
+                name = strdup(yyget_text());
+                if (!name)
+                    return luaL_error(L, "no mem");
+                tok = yylex();
+            }
+
+            if (!name)
                 return cparse_expected_error(L, tok, "identifier");
-
-            name = yyget_text();
 
             lua_rawgetp(L, LUA_REGISTRYINDEX, &ctdef_registry);
             lua_getfield(L, -1, name);
 
-            if (!lua_isnil(L, -1))
+            if (!lua_isnil(L, -1)) {
                 return luaL_error(L, "%d:redefinition of symbol '%s'", yyget_lineno(), name);
+            }
 
             lua_pop(L, 1);
             ctype_lookup(L, &ct, true);
             lua_setfield(L, -2, name);
             lua_pop(L, 1);
 
-            if (cparse_check_tok(L, yylex()) != ';')
+            free(name);
+
+            if (cparse_check_tok(L, tok) != ';')
                 return cparse_expected_error(L, tok, ";");
 
             continue;
@@ -2233,20 +2619,25 @@ static struct ctype *lua_check_ct(lua_State *L, bool *va, bool keep)
             flexible = *va;
 
         tok = cparse_basetype(L, yylex(), &match);
-        tok = cparse_pointer(L, tok, &match);
-        tok = cparse_array(L, tok, &flexible, &array_size);
+
+        if (cparse_check_tok(L, tok) == '(') {
+            tok = cparse_function_arg(L, tok, &match, NULL);
+        } else {
+            tok = cparse_pointer(L, tok, &match);
+            tok = cparse_array(L, tok, &flexible, &array_size);
+
+            if (flexible || array_size >= 0) {
+                if (flexible) {
+                    array_size = luaL_checkinteger(L, 2);
+                    luaL_argcheck(L, 2, array_size > 0, "array size must great than 0");
+                }
+
+                cparse_new_array(L, array_size, &match);
+            }
+        }
 
         if (tok)
             luaL_error(L, "%d:unexpected '%s'", yyget_lineno(), yyget_text());
-
-        if (flexible || array_size >= 0) {
-            if (flexible) {
-                array_size = luaL_checkinteger(L, 2);
-                luaL_argcheck(L, 2, array_size > 0, "array size must great than 0");
-            }
-
-            cparse_new_array(L, array_size, &match);
-        }
 
         if (va)
             *va = flexible;
@@ -2283,6 +2674,10 @@ static int lua_ffi_new(lua_State *L)
 {
     bool va = true;
     struct ctype *ct = lua_check_ct(L, &va, false);
+
+    if (ct->type == CTYPE_FUNC || ct->type == CTYPE_VOID)
+        return luaL_error(L, "invalid C type");
+
     struct cdata *cd = cdata_new(L, ct, NULL);
     int idx = va ? 3 : 2;
     int ninit;
@@ -2304,7 +2699,13 @@ static int lua_ffi_cast(lua_State *L)
     struct ctype *ct = lua_check_ct(L, NULL, false);
     struct cdata *cd = cdata_new(L, ct, NULL);
 
-    cdata_from_lua(L, ct, cdata_ptr(cd), 2, true);
+    if (ct->type == CTYPE_PTR && ct->ptr->type == CTYPE_FUNC) {
+        luaL_checktype(L, 2, LUA_TFUNCTION);
+        cd->cb = ccallback_new(L, ct->ptr->func, 2);
+        cdata_ptr_set(cd, cd->cb->code);
+    } else {
+        cdata_from_lua(L, ct, cdata_ptr(cd), 2, true);
+    }
 
     return 1;
 }

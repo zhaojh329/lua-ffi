@@ -177,6 +177,31 @@ local tests = {
         assert(a[1] == 567)
     end,
     function()
+        ffi.cdef([[
+            int cb_mul10(int i);
+            int call_f0(int (*cb)(int));
+            int call_f1(int (*cb)(int), int x);
+            int call_f2(int (*cb)(int i), int x);
+            int call_f3(int x, int (*cb)(int i));
+
+            typedef int (*callback_t)(int);
+            int call_f4(int x, callback_t cb);
+        ]])
+
+        local lib = ffi.load('./libtest.so')
+
+        assert(lib.call_f0(lib.cb_mul10) == 200)
+        assert(lib.call_f1(lib.cb_mul10, 20) == 200)
+        assert(lib.call_f2(lib.cb_mul10, 20) == 200)
+        assert(lib.call_f3(20, lib.cb_mul10) == 200)
+
+        local cb = ffi.cast('int (*)(int)', function(i)
+            return i * 10
+        end)
+
+        assert(lib.call_f4(20, cb) == 200)
+    end,
+    function()
         local tp = ffi.metatype(ffi.typeof('struct Point'), {
             __tostring = function(self)
                 return string.format('x:%d,y:%d', self.x, self.y)
