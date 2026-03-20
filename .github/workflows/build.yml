@@ -27,6 +27,5 @@ jobs:
           sudo apt update
           sudo apt install -y libffi-dev lua${{ matrix.version }} ${{ matrix.pkg }}
           cmake . -D${{ matrix.macro }}=ON && make && sudo make install
-          gcc -shared -fPIC tests/test.c -o libtest.so
-          lua${{ matrix.version }} ./tests/basetype.lua
+          gcc -shared -fPIC tests/test.c -o tests/libtest.so
           lua${{ matrix.version }} ./tests/test.lua
