@@ -1,4 +1,4 @@
-# lua-ffi([中文](/README_ZH.md))
+# lua-ffi
 
 [1]: https://img.shields.io/badge/license-MIT-brightgreen.svg?style=plastic
 [2]: /LICENSE
@@ -23,19 +23,16 @@
 [cffi-lua]: https://github.com/q66/cffi-lua
 [libffi]: https://sourceware.org/libffi/
 
-A foreign function interface (FFI) is a mechanism by which a program written in one programming language
-can call routines or make use of services written or compiled in another one. An FFI is often used in
-contexts where calls are made into binary dynamic-link library.
+外部函数接口（FFI）是一种机制，使一种编程语言编写的程序可以调用另一种语言实现或编译出的函数/服务。FFI 常用于调用二进制动态链接库中的能力。
 
-Lua-ffi is a portable lightweight C FFI for Lua, based on [libffi] and aiming to be mostly compatible
-with [LuaJIT] FFI, but written from scratch in C language.
+lua-ffi 是一个面向 Lua 的可移植、轻量级 C FFI，基于 [libffi] 实现，目标是尽量兼容 [LuaJIT] FFI，并且由 C 语言从零实现。
 
-## Features
+## 特性
 
-* portable - Used in Lua5.1, Lua5.2, Lua5.3 and Lua5.4.
-* lightweight - Written in C language, very small, only about 50KB.
+* 可移植：可用于 Lua5.1、Lua5.2、Lua5.3 和 Lua5.4。
+* 轻量：使用 C 语言实现，体积很小，仅约 50KB。
 
-## Example
+## 示例
 
 ```lua
 local ffi = require 'ffi'
@@ -68,14 +65,14 @@ else
 end
 ```
 
-## [Usage Guide](USAGE.md)
+## [使用指南](USAGE_ZH.md)
 
-## Requirements
+## 依赖
 
-* [libffi] - A portable foreign-function interface library.
-* Lua 5.1 or newer (tested up to and including 5.4).
+* [libffi] - 一个可移植的外部函数接口库。
+* Lua 5.1 或更新版本（已测试到 5.4）。
 
-## Build
+## 构建
 
 ### Ubuntu
 
@@ -92,12 +89,12 @@ end
             <>  lua-ffi-lua5.3..... A portable lightweight C FFI for lua5.3, based on libffi
             <*> lua-ffi-lua5.4..... A portable lightweight C FFI for lua5.4, based on libffi
 
-## [Testing](/tests)
+## [测试](/tests)
 
-## Acknowledgements
+## 致谢
 
-This project was inspired by the following repositories:
+本项目受以下仓库启发：
 
 - [cffi-lua]
 
-Thanks to the authors of these repositories for their excellent work.
+感谢这些项目作者的优秀工作。
