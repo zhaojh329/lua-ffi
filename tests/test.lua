@@ -108,6 +108,17 @@ ffi.cdef([[
         int i;
     };
 
+    struct bitfield_u {
+        unsigned int a:3;
+        unsigned int b:5;
+        unsigned int c:6;
+    };
+
+    struct bitfield_s {
+        int a:3;
+        int b:5;
+    };
+
     int sprintf(char *str, const char *format, ...);
     void *malloc(size_t size);
     void free(void *ptr);
@@ -295,6 +306,35 @@ local tests = {
 
         local p = ffi.new('struct Point')
         assert(ffi.sizeof(p) == ffi.sizeof('struct Point'))
+    end,
+    function()
+        local bf = ffi.new('struct bitfield_u')
+        bf.a = 7
+        bf.b = 31
+        bf.c = 42
+        assert(bf.a == 7)
+        assert(bf.b == 31)
+        assert(bf.c == 42)
+
+        bf.a = 15
+        assert(bf.a == 7)
+
+        local sbf = ffi.new('struct bitfield_s')
+        sbf.a = -1
+        sbf.b = -2
+        assert(sbf.a == -1)
+        assert(sbf.b == -2)
+
+        assert(ffi.sizeof('struct bitfield_u') == 4)
+        assert(ffi.offsetof('struct bitfield_u', 'a') == 0)
+
+        expect_error(function()
+            ffi.cdef([[ struct bad_bitfield_mix { unsigned int a:3; unsigned short b:3; }; ]])
+        end, 'bitfield members must share one integer base type')
+
+        expect_error(function()
+            ffi.cdef([[ struct bad_bitfield_float { float a:3; }; ]])
+        end, 'must use integer base type')
     end,
     function()
         local x = ffi.new('int', 17)

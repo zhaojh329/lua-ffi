@@ -36,6 +36,7 @@ ffi.cdef([[
 - `typedef` declarations.
 - `struct` and `union` declarations (including nested/anonymous members).
 - Packed attribute parsing (`__attribute__((packed))`).
+- Struct bitfields with named members for a shared integer base type (for example `unsigned int a:3; unsigned int b:5;`).
 - Function declarations and function pointer types.
 - Array declarators, including flexible form `?` in type strings used by `ffi.new`.
 
@@ -44,6 +45,8 @@ ffi.cdef([[
 - Declarations are additive.
 - Redefinition of known symbols is rejected.
 - `cdef` is for declarations only (no function definitions).
+- Current bitfield limits: anonymous bitfields (such as `:0`), mixed base integer types in one record, and unions with bitfields are rejected.
+- Calling C functions or callbacks with by-value record types that contain bitfields is currently not supported.
 
 ### Default basic types supported
 
