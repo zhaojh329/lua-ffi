@@ -108,6 +108,22 @@ ffi.cdef([[
         int i;
     };
 
+    struct bitfield_u {
+        unsigned int a:3;
+        unsigned int b:5;
+        unsigned int c:6;
+    };
+
+    struct bitfield_s {
+        int a:3;
+        int b:5;
+    };
+
+    struct nested_bitfield_outer {
+        struct bitfield_u inner;
+        int x;
+    };
+
     int sprintf(char *str, const char *format, ...);
     void *malloc(size_t size);
     void free(void *ptr);
@@ -119,6 +135,13 @@ ffi.cdef([[
     struct student *student_new(int age, const char *name);
 
     int *pass_array(int a[]);
+
+    int bitfield_u_matches(struct bitfield_u *bf, unsigned int a, unsigned int b, unsigned int c);
+    void bitfield_u_set(struct bitfield_u *bf, unsigned int a, unsigned int b, unsigned int c);
+    int bitfield_s_matches(struct bitfield_s *bf, int a, int b);
+    void bitfield_s_set(struct bitfield_s *bf, int a, int b);
+    int nested_bitfield_total(struct nested_bitfield_outer outer);
+    struct nested_bitfield_outer nested_bitfield_make(void);
 
     int cb_mul10(int i);
     int call_f0(int (*cb)(int));
@@ -295,6 +318,76 @@ local tests = {
 
         local p = ffi.new('struct Point')
         assert(ffi.sizeof(p) == ffi.sizeof('struct Point'))
+    end,
+    function()
+        local lib = ffi.load(LIB_PATH)
+
+        local bf = ffi.new('struct bitfield_u')
+        bf.a = 7
+        bf.b = 31
+        bf.c = 42
+        assert(bf.a == 7)
+        assert(bf.b == 31)
+        assert(bf.c == 42)
+        assert(lib.bitfield_u_matches(bf, 7, 31, 42) == 1)
+
+        bf.a = 15 -- only 3 bits, so should wrap around to 7
+        assert(bf.a == 7)
+        assert(lib.bitfield_u_matches(bf, 7, 31, 42) == 1)
+
+        local bf_from_c = ffi.new('struct bitfield_u')
+        lib.bitfield_u_set(bf_from_c, 5, 17, 33)
+        assert(bf_from_c.a == 5)
+        assert(bf_from_c.b == 17)
+        assert(bf_from_c.c == 33)
+
+        local sbf = ffi.new('struct bitfield_s')
+        sbf.a = -1
+        sbf.b = -2
+        assert(sbf.a == -1)
+        assert(sbf.b == -2)
+        assert(lib.bitfield_s_matches(sbf, -1, -2) == 1)
+
+        local sbf_from_c = ffi.new('struct bitfield_s')
+        lib.bitfield_s_set(sbf_from_c, -3, 7)
+        assert(sbf_from_c.a == -3)
+        assert(sbf_from_c.b == 7)
+
+        local nested = ffi.new('struct nested_bitfield_outer')
+        nested.inner.a = 1
+        nested.inner.b = 2
+        nested.inner.c = 3
+        nested.x = 4
+
+        expect_error(function()
+            return lib.nested_bitfield_total(nested)
+        end, 'function argument type with bitfield is not supported')
+
+        expect_error(function()
+            return lib.nested_bitfield_make()
+        end, 'function return type with bitfield is not supported')
+
+        expect_error(function()
+            return ffi.cast('int (*)(struct nested_bitfield_outer)', function()
+                return 0
+            end)
+        end, 'callback argument type with bitfield is not supported')
+
+        expect_error(function()
+            return ffi.cast('struct nested_bitfield_outer (*)(void)', function()
+            end)
+        end, 'callback return type with bitfield is not supported')
+
+        assert(ffi.sizeof('struct bitfield_u') == 4)
+        assert(ffi.offsetof('struct bitfield_u', 'a') == 0)
+
+        expect_error(function()
+            ffi.cdef([[ struct bad_bitfield_mix { unsigned int a:3; unsigned short b:3; }; ]])
+        end, 'bitfield members must share one integer base type')
+
+        expect_error(function()
+            ffi.cdef([[ struct bad_bitfield_float { float a:3; }; ]])
+        end, 'must use integer base type')
     end,
     function()
         local x = ffi.new('int', 17)

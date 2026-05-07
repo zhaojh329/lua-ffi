@@ -63,7 +63,7 @@ char *lex_err;
 "blkcnt_t"              { return TOK_BLKCNT_T; }
 "time_t"                { return TOK_TIME_T; }
 
-[\?\*(){}\[\],;]        { return yytext[0]; }
+[\?\*(){}\[\],;:]       { return yytext[0]; }
 [_a-zA-Z][_a-zA-Z0-9]*  { return TOK_NAME; }
 "..."                   { return TOK_VAL; }
 [ \t\n]+                { /* ignore all spaces */ }
