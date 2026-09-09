@@ -2317,6 +2317,8 @@ static int cparse_record(lua_State *L, struct ctype *ct, bool is_union)
         struct crecord_field *fields[MAX_RECORD_FIELDS];
         size_t offsets[MAX_RECORD_FIELDS];
         ffi_type **elements;
+        size_t union_alignment = 1;
+        size_t union_size = 0;
         size_t nfield = 0;
         int i, j, nelement, next_tok;
 
@@ -2388,8 +2390,15 @@ static int cparse_record(lua_State *L, struct ctype *ct, bool is_union)
             for (i = 0; i < nfield; i++) {
                 if (!ctype_is_zero_array(fields[i]->ct)) {
                     ffi_type *ft = ctype_ft(fields[i]->ct);
+
                     if (i == 0 || ft->size > elements[0]->size)
                         elements[0] = ft;
+
+                    if (ft->alignment > union_alignment)
+                        union_alignment = ft->alignment;
+
+                    if (ft->size > union_size)
+                        union_size = ft->size;
                 }
             }
 
@@ -2414,7 +2423,12 @@ static int cparse_record(lua_State *L, struct ctype *ct, bool is_union)
             if (nelement > 1)
                 init_ft_struct(L, &ct->rc->ft, elements, offsets);
 
-            if (!is_union) {
+            if (is_union) {
+                if (ct->rc->ft.alignment < union_alignment)
+                    ct->rc->ft.alignment = union_alignment;
+
+                ct->rc->ft.size = align_up(union_size, ct->rc->ft.alignment);
+            } else {
                 for (i = 0, j = 0; i < nfield; i++) {
                     if (ctype_is_zero_array(fields[i]->ct)) {
                         if (i > 0)
