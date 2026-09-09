@@ -919,9 +919,19 @@ static int cdata_to_lua(lua_State *L, struct ctype *ct, void *ptr)
     case FFI_TYPE_SINT64:
         PUSH_INTEGER(L, int64_t, ptr);
         break;
-    case FFI_TYPE_UINT64:
-        PUSH_INTEGER(L, uint64_t, ptr);
+    case FFI_TYPE_UINT64: {
+        uint64_t value;
+
+        memcpy(&value, ptr, sizeof(value));
+#if LUA_VERSION_NUM >= 503
+        if (value <= (uint64_t)LUA_MAXINTEGER) {
+            lua_pushinteger(L, (lua_Integer)value);
+            break;
+        }
+#endif
+        lua_pushnumber(L, (lua_Number)value);
         break;
+    }
     case FFI_TYPE_FLOAT:
         PUSH_NUMBER(L, float, ptr);
         break;
