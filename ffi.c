@@ -1540,8 +1540,12 @@ static int cdata_index_crecord(lua_State *L, struct cdata *cd, struct ctype *ct,
                 lua_rawgeti(L, LUA_REGISTRYINDEX, rc->mt_ref);
                 lua_getfield(L, -1, "__index");
 
-                if (lua_isfunction(L, -1))
+                if (lua_isfunction(L, -1)) {
+                    lua_pushvalue(L, 1);
+                    lua_pushvalue(L, 2);
+                    lua_call(L, 2, 1);
                     return 1;
+                }
 
                 if (lua_istable(L, -1)) {
                     lua_getfield(L, -1, name);
