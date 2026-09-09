@@ -3149,7 +3149,7 @@ static int lua_ffi_string(lua_State *L)
         goto converr;
 
     if (array && array->size) {
-        char *p = memchr(ptr, '\0', array->ft.size);
+        const char *p = memchr(ptr, '\0', array->ft.size);
         len = p ? p - ptr : array->ft.size;
         lua_pushlstring(L, ptr, len);
     } else {
