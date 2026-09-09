@@ -1247,6 +1247,9 @@ static void ccallback_release(lua_State *L, struct ccallback *cb)
     if (!cb)
         return;
 
+    if (cb->err_ref != LUA_REFNIL)
+        luaL_unref(L, LUA_REGISTRYINDEX, cb->err_ref);
+
     if (cb->fn_ref != LUA_REFNIL)
         luaL_unref(L, LUA_REGISTRYINDEX, cb->fn_ref);
 
