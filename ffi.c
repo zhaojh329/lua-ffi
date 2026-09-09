@@ -108,6 +108,7 @@ struct carray {
     size_t size;
     ffi_type ft;
     struct ctype *ct;
+    ffi_type *elements[0];
 };
 
 struct crecord_field {
@@ -603,6 +604,8 @@ static struct ctype *ctype_lookup(lua_State *L, struct ctype *match, bool keep)
 static struct carray *carray_lookup(lua_State *L, size_t size, struct ctype *ct)
 {
     struct carray *a;
+    ffi_type *element;
+    size_t i;
 
     lua_rawgetp(L, LUA_REGISTRYINDEX, &carray_registry);
 
@@ -617,18 +620,26 @@ static struct carray *carray_lookup(lua_State *L, size_t size, struct ctype *ct)
         lua_pop(L, 1);
     }
 
-    a = lua_newuserdata(L, sizeof(struct carray));
+    if (size > (SIZE_MAX - sizeof(*a)) / sizeof(*a->elements) - 1)
+        luaL_error(L, "array too large");
+
+    a = lua_newuserdata(L, sizeof(*a) + sizeof(*a->elements) * (size + 1));
     if (!a)
         luaL_error(L, "no mem");
 
     lua_rawsetp(L, -2, a);
     lua_pop(L, 1);
 
-    if (size) {
-        a->ft.type = FFI_TYPE_STRUCT;
-        a->ft.alignment = ctype_ft(ct)->alignment;
-        a->ft.size = ctype_sizeof(ct) * size;
-    }
+    element = ctype_ft(ct);
+    a->ft.size = ctype_sizeof(ct) * size;
+    a->ft.alignment = element->alignment;
+    a->ft.type = FFI_TYPE_STRUCT;
+    a->ft.elements = a->elements;
+
+    for (i = 0; i < size; i++)
+        a->elements[i] = element;
+
+    a->elements[size] = NULL;
 
     a->size = size;
     a->ct = ctype_lookup(L, ct, false);
