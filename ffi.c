@@ -1622,6 +1622,9 @@ static int cdata_call(lua_State *L)
 
     narg = lua_gettop(L) - 1;
 
+    if (narg > MAX_FUNC_ARGS)
+        return luaL_error(L, "too many arguments (max %d)", MAX_FUNC_ARGS);
+
     if (func->va) {
         if (narg < func->narg)
             return luaL_error(L, "wrong number of arguments for function call");
