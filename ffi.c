@@ -2013,6 +2013,19 @@ static void ctype_to_ptr(lua_State *L, struct ctype *ct)
 
 extern char *lex_err;
 
+static void cparse_begin(const char *str, size_t len, int line)
+{
+    lex_err = NULL;
+    yy_scan_bytes(str, len);
+    yyset_lineno(line);
+}
+
+static void cparse_end(void)
+{
+    yylex_destroy();
+    lex_err = NULL;
+}
+
 static inline int cparse_check_tok(lua_State *L, int tok)
 {
     if (!tok && lex_err)
@@ -2907,18 +2920,9 @@ static int cparse_function(lua_State *L, int tok, struct ctype *rtype)
     return 0;
 }
 
-static int lua_ffi_cdef(lua_State *L)
+static int lua_ffi_cdef_parse(lua_State *L)
 {
-    size_t len;
-    const char *str = luaL_checklstring(L, 1, &len);
-    lua_Debug ar;
     int tok;
-
-    lua_getstack(L, 1, &ar);
-    lua_getinfo(L, "nSl", &ar);
-
-    yy_scan_bytes(str, len);
-    yyset_lineno(ar.currentline);
 
     while ((tok = yylex())) {
         bool tdef = false;
@@ -2980,7 +2984,29 @@ static int lua_ffi_cdef(lua_State *L)
         cparse_function(L, tok, &ct);
     }
 
-    yylex_destroy();
+    cparse_check_tok(L, tok);
+
+    return 0;
+}
+
+static int lua_ffi_cdef(lua_State *L)
+{
+    size_t len;
+    const char *str = luaL_checklstring(L, 1, &len);
+    lua_Debug ar;
+    int status;
+
+    lua_getstack(L, 1, &ar);
+    lua_getinfo(L, "nSl", &ar);
+
+    lua_pushcfunction(L, lua_ffi_cdef_parse);
+    cparse_begin(str, len, ar.currentline);
+    status = lua_pcall(L, 0, 0, 0);
+
+    cparse_end();
+
+    if (status)
+        return lua_error(L);
 
     return 0;
 }
@@ -3026,6 +3052,34 @@ static int lua_ffi_load(lua_State *L)
     return load_lib(L, path, global);
 }
 
+struct cparse_type_context {
+    struct ctype match;
+    bool flexible;
+    bool is_array;
+    int array_size;
+};
+
+static int lua_check_ct_parse(lua_State *L)
+{
+    struct cparse_type_context *ctx = lua_touserdata(L, 1);
+    int tok;
+
+    tok = cparse_basetype(L, yylex(), &ctx->match);
+
+    if (cparse_check_tok(L, tok) == '(') {
+        tok = cparse_function_arg(L, tok, &ctx->match, NULL);
+    } else {
+        tok = cparse_pointer(L, tok, &ctx->match);
+        tok = cparse_array(L, tok, &ctx->flexible, &ctx->array_size);
+        ctx->is_array = ctx->flexible || ctx->array_size >= 0;
+    }
+
+    if (cparse_check_tok(L, tok))
+        luaL_error(L, "%d:unexpected '%s'", yyget_lineno(), yyget_text());
+
+    return 0;
+}
+
 static struct ctype *lua_check_ct(lua_State *L, bool *va, bool keep)
 {
     struct cdata *cd;
@@ -3034,49 +3088,40 @@ static struct ctype *lua_check_ct(lua_State *L, bool *va, bool keep)
     if (lua_type(L, 1) == LUA_TSTRING) {
         size_t len;
         const char *str = luaL_checklstring(L, 1, &len);
-        bool flexible = false;
-        struct ctype match;
-        int array_size;
+        struct cparse_type_context ctx = {
+            .flexible = va ? *va : false,
+            .array_size = -1
+        };
         lua_Debug ar;
-        int tok;
+        int status;
 
         lua_getstack(L, 1, &ar);
         lua_getinfo(L, "nSl", &ar);
 
-        yy_scan_bytes(str, len);
+        lua_pushcfunction(L, lua_check_ct_parse);
+        lua_pushlightuserdata(L, &ctx);
+        cparse_begin(str, len, ar.currentline - 1);
+        status = lua_pcall(L, 1, 0, 0);
+        cparse_end();
 
-        yyset_lineno(ar.currentline - 1);
-
-        if (va)
-            flexible = *va;
-
-        tok = cparse_basetype(L, yylex(), &match);
-
-        if (cparse_check_tok(L, tok) == '(') {
-            tok = cparse_function_arg(L, tok, &match, NULL);
-        } else {
-            tok = cparse_pointer(L, tok, &match);
-            tok = cparse_array(L, tok, &flexible, &array_size);
-
-            if (flexible || array_size >= 0) {
-                if (flexible) {
-                    array_size = luaL_checkinteger(L, 2);
-                    luaL_argcheck(L, 2, array_size > 0, "array size must great than 0");
-                }
-
-                cparse_new_array(L, array_size, &match);
-            }
+        if (status) {
+            lua_error(L);
+            return NULL;
         }
 
-        if (tok)
-            luaL_error(L, "%d:unexpected '%s'", yyget_lineno(), yyget_text());
+        if (ctx.is_array) {
+            if (ctx.flexible) {
+                ctx.array_size = luaL_checkinteger(L, 2);
+                luaL_argcheck(L, 2, ctx.array_size > 0, "array size must great than 0");
+            }
+
+            cparse_new_array(L, ctx.array_size, &ctx.match);
+        }
 
         if (va)
-            *va = flexible;
+            *va = ctx.flexible;
 
-        yylex_destroy();
-
-        return ctype_lookup(L, &match, keep);
+        return ctype_lookup(L, &ctx.match, keep);
     }
 
     if (va)
