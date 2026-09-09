@@ -1318,6 +1318,10 @@ static int cdata_from_lua(lua_State *L, struct ctype *ct, void *ptr, int idx, bo
         if (ct->type == CTYPE_ARRAY && ct->array->ct->type == CTYPE_CHAR) {
             size_t len;
             const char *str = lua_tolstring(L, idx, &len);
+
+            if (ct->array->size && len >= ct->array->size)
+                return luaL_argerror(L, idx, "initializer string too long");
+
             memcpy(ptr, str, len + 1);
             return 0;
         }
