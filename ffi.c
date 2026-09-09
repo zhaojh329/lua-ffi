@@ -169,6 +169,7 @@ static const char *cfunc_registry;
 static const char *ctype_registry;
 static const char *ctdef_registry;
 static const char *clib_registry;
+static const char *cdata_refs_mt;
 
 #if LUA_VERSION_NUM < 503
 
@@ -723,12 +724,26 @@ static struct cdata *cdata_new(lua_State *L, struct ctype *ct, void *ptr)
     lua_setmetatable(L, -2);
 
     lua_newtable(L);
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &cdata_refs_mt);
+    lua_setmetatable(L, -2);
     lua_rawsetp(L, LUA_REGISTRYINDEX, cd);
 
     if (!ptr)
         memset(cdata_ptr(cd), 0, ctype_sizeof(ct));
 
     return cd;
+}
+
+static void cdata_set_owner(lua_State *L, struct cdata *cd, int owner_idx)
+{
+    owner_idx = lua_absindex(L, owner_idx);
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, cd);
+    /* Cached views are weak values; a table key keeps the owner alive. */
+    lua_pushvalue(L, owner_idx);
+    lua_pushboolean(L, true);
+    lua_rawset(L, -3);
+    lua_pop(L, 1);
 }
 
 static int __cdata_tostring(lua_State *L, struct cdata *cd)
@@ -1377,6 +1392,7 @@ static int cdata_from_lua(lua_State *L, struct ctype *ct, void *ptr, int idx, bo
 static int cdata_index_ptr(lua_State *L, struct cdata *cd, struct ctype *ct, bool to)
 {
     void *ptr = cdata_type(cd) == CTYPE_PTR ? cdata_ptr_ptr(cd) : cdata_ptr(cd);
+    struct cdata *view;
     int idx;
 
     if (ct->type == CTYPE_VOID) {
@@ -1402,12 +1418,16 @@ static int cdata_index_ptr(lua_State *L, struct cdata *cd, struct ctype *ct, boo
 
         cdata_to_lua(L, ct, ptr + ctype_sizeof(ct) * idx);
 
-        if (luaL_testudata(L, -1, CDATA_MT)) {
+        view = luaL_testudata(L, -1, CDATA_MT);
+        if (view) {
+            cdata_set_owner(L, view, 1);
+
             lua_rawgetp(L, LUA_REGISTRYINDEX, cd);
             lua_pushvalue(L, -2);
             lua_rawseti(L, -2, idx);
             lua_pop(L, 1);
         }
+
         return 1;
     } else {
         return cdata_from_lua(L, ct, ptr + ctype_sizeof(ct) * idx, 3, false);
@@ -1444,6 +1464,7 @@ static int cdata_index_crecord(lua_State *L, struct cdata *cd, struct ctype *ct,
     void *ptr = cdata_type(cd) == CTYPE_PTR ? cdata_ptr_ptr(cd) : cdata_ptr(cd);
     struct crecord *rc = ct->rc;
     struct crecord_field *field;
+    struct cdata *view;
     size_t offset = 0;
     const char *name;
 
@@ -1490,12 +1511,16 @@ static int cdata_index_crecord(lua_State *L, struct cdata *cd, struct ctype *ct,
         else
             cdata_to_lua(L, field->ct, ptr + offset);
 
-        if (luaL_testudata(L, -1, CDATA_MT)) {
+        view = luaL_testudata(L, -1, CDATA_MT);
+        if (view) {
+            cdata_set_owner(L, view, 1);
+
             lua_rawgetp(L, LUA_REGISTRYINDEX, cd);
             lua_pushvalue(L, -2);
             lua_setfield(L, -2, name);
             lua_pop(L, 1);
         }
+
         return 1;
     } else {
         if (field->bit_size)
@@ -3280,6 +3305,11 @@ static void create_nullptr(lua_State *L)
 
 int luaopen_ffi(lua_State *L)
 {
+    lua_newtable(L);
+    lua_pushliteral(L, "v");
+    lua_setfield(L, -2, "__mode");
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &cdata_refs_mt);
+
     lua_newtable(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &crecord_registry);
 
