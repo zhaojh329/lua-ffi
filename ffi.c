@@ -2966,7 +2966,7 @@ static int load_lib(lua_State *L, const char *path, bool global)
         h = dlopen(path, RTLD_LAZY | (global ? RTLD_GLOBAL : RTLD_LOCAL));
         if (!h) {
             const char *err = dlerror();
-            return luaL_error(L, err ? err : "dlopen() failed");
+            return luaL_error(L, "%s", err ? err : "dlopen() failed");
         }
     } else {
         h = RTLD_DEFAULT;
