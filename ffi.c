@@ -409,6 +409,11 @@ static void *cdata_ptr_ptr(struct cdata *cd)
     return *(void **)cdata_ptr(cd);
 }
 
+static void *cdata_buffer_ptr(struct cdata *cd)
+{
+    return cdata_type(cd) == CTYPE_PTR ? cdata_ptr_ptr(cd) : cdata_ptr(cd);
+}
+
 static inline bool ctype_ptr_to(struct ctype *ct, int type)
 {
     return ct->type != CTYPE_PTR ? false : ct->ptr->type == type;
@@ -3249,7 +3254,7 @@ static int lua_ffi_string(lua_State *L)
     struct cdata *cd = luaL_checkudata(L, 1, CDATA_MT);
     struct carray *array = NULL;
     struct ctype *ct = cd->ct;
-    const char *ptr = ct->type == CTYPE_PTR ? cdata_ptr_ptr(cd) : cdata_ptr(cd);
+    const char *ptr = cdata_buffer_ptr(cd);
     size_t len;
 
     if (lua_gettop(L) > 1) {
@@ -3301,7 +3306,7 @@ converr:
 static int lua_ffi_copy(lua_State *L)
 {
     struct cdata *cd = luaL_checkudata(L, 1, CDATA_MT);
-    void *dst = cdata_ptr(cd);
+    void *dst = cdata_buffer_ptr(cd);
     const void *src;
     size_t len;
 
@@ -3315,7 +3320,7 @@ static int lua_ffi_copy(lua_State *L)
         if (lua_type(L, 2) == LUA_TSTRING)
             src = lua_tostring(L, 2);
         else
-            src = cdata_ptr(luaL_checkudata(L, 2, CDATA_MT));
+            src = cdata_buffer_ptr(luaL_checkudata(L, 2, CDATA_MT));
 
         memcpy(dst, src, len);
     }
@@ -3331,7 +3336,7 @@ static int lua_ffi_fill(lua_State *L)
     int len = luaL_checkinteger(L, 2);
     int c = luaL_optinteger(L, 3, 0);
 
-    memset(cdata_ptr(cd), c, len);
+    memset(cdata_buffer_ptr(cd), c, len);
 
     return 0;
 }
