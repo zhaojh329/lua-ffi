@@ -496,6 +496,40 @@ static bool ctype_has_bitfield(struct ctype *ct)
     }
 }
 
+#if defined(__x86_64__) && !defined(_WIN32)
+static bool ctype_has_unaligned_field(struct ctype *ct, size_t offset)
+{
+    size_t i, count;
+
+    switch (ct->type) {
+    case CTYPE_RECORD:
+        for (i = 0; i < ct->rc->nfield; i++) {
+            struct crecord_field *field = ct->rc->fields[i];
+
+            if (field->ct->type == CTYPE_ARRAY && !field->ct->array->size)
+                continue;
+
+            if (ctype_has_unaligned_field(field->ct, offset + field->offset))
+                return true;
+        }
+
+        return false;
+    case CTYPE_ARRAY:
+        count = ct->array->size < 2 ? ct->array->size : 2;
+
+        for (i = 0; i < count; i++) {
+            if (ctype_has_unaligned_field(ct->array->ct,
+                                          offset + i * ctype_sizeof(ct->array->ct)))
+                return true;
+        }
+
+        return false;
+    default:
+        return offset % ctype_ft(ct)->alignment != 0;
+    }
+}
+#endif
+
 static void cdata_ptr_set(struct cdata *cd, void *ptr)
 {
     int type = cdata_type(cd);
@@ -1642,6 +1676,10 @@ static int cdata_call(lua_State *L)
     struct cdata *cd = luaL_checkudata(L, 1, CDATA_MT);
     ffi_type *args[MAX_FUNC_ARGS] = {};
     void *values[MAX_FUNC_ARGS] = {};
+#if defined(__x86_64__) && !defined(_WIN32)
+    ffi_type packed_args[MAX_FUNC_ARGS] = {};
+    ffi_type *packed_elements[MAX_FUNC_ARGS][2] = {};
+#endif
     struct ctype *ct = cd->ct;
     int i, status, narg;
     struct cfunc *func;
@@ -1678,6 +1716,17 @@ static int cdata_call(lua_State *L)
             return luaL_error(L, "function argument type with bitfield is not supported");
 
         args[i] = ctype_ft(func->args[i]);
+#if defined(__x86_64__) && !defined(_WIN32)
+        if (func->args[i]->type == CTYPE_RECORD &&
+            ctype_has_unaligned_field(func->args[i], 0)) {
+            /* SysV requires aggregates with unaligned fields in memory.
+             * A synthetic x87 member makes libffi select that ABI class. */
+            packed_args[i] = *args[i];
+            packed_elements[i][0] = &ffi_type_longdouble;
+            packed_args[i].elements = packed_elements[i];
+            args[i] = &packed_args[i];
+        }
+#endif
         values[i] = alloca(args[i]->size);
         cdata_from_lua(L, func->args[i], values[i], i + 2, false);
     }
