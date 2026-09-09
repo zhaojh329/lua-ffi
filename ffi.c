@@ -1588,8 +1588,14 @@ static int cdata_index_common(lua_State *L, bool to)
 {
     struct cdata *cd = luaL_checkudata(L, 1, CDATA_MT);
     struct ctype *ct = cd->ct;
+    struct ctype *target = ct;
 
-    if (!to && ct->is_const)
+    if (ct->type == CTYPE_PTR)
+        target = ct->ptr;
+    else if (ct->type == CTYPE_ARRAY)
+        target = ct->array->ct;
+
+    if (!to && target->is_const)
         return luaL_error(L, "assignment of read-only variable");
 
     switch (ct->type) {
