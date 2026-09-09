@@ -2511,7 +2511,7 @@ static int cparse_record(lua_State *L, struct ctype *ct, bool is_union)
 
 static int cparse_squals(int type, int squals, struct ctype *ct, ffi_type *s, ffi_type *u)
 {
-    ct->type = s ? ++type : type;
+    ct->type = squals == TOK_SIGNED ? type : type + 1;
     ct->ft = squals == TOK_SIGNED ? s : u;
     return yylex();
 }
@@ -2544,7 +2544,7 @@ static int cparse_basetype(lua_State *L, int tok, struct ctype *ct)
             tok = cparse_squals(CTYPE_LONG, squals, ct, &ffi_type_slong, &ffi_type_ulong);
             break;
         default:
-            ct->type = CTYPE_INT;
+            ct->type = squals == TOK_SIGNED ? CTYPE_INT : CTYPE_UINT;
             ct->ft = (squals == TOK_SIGNED) ? &ffi_type_sint : &ffi_type_uint;
             break;
         }
