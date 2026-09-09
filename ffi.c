@@ -896,6 +896,22 @@ static int cdata_to_lua(lua_State *L, struct ctype *ct, void *ptr)
     return 1;
 }
 
+static int cdata_to_lua_cb_arg(lua_State *L, struct ctype *ct, void *ptr)
+{
+    struct cdata *cd;
+
+    switch (ct->type) {
+    case CTYPE_RECORD:
+    case CTYPE_ARRAY:
+    case CTYPE_PTR:
+        cd = cdata_new(L, ct, NULL);
+        memcpy(cdata_ptr(cd), ptr, ctype_sizeof(ct));
+        return 1;
+    default:
+        return cdata_to_lua(L, ct, ptr);
+    }
+}
+
 static int cdata_from_lua(lua_State *L, struct ctype *ct, void *ptr, int idx, bool cast);
 
 static lua_Integer from_lua_num_int(lua_State *L, int idx)
@@ -1161,7 +1177,7 @@ static void ccallback_invoke(ffi_cif *cif, void *ret, void **args, void *userdat
     lua_rawgeti(L, LUA_REGISTRYINDEX, cb->fn_ref);
 
     for (i = 0; i < func->narg; i++)
-        cdata_to_lua(L, func->args[i], args[i]);
+        cdata_to_lua_cb_arg(L, func->args[i], args[i]);
 
     if (lua_pcall(L, func->narg, rtype->type == CTYPE_VOID ? 0 : 1, 0)) {
         if (lua_isnil(L, -1)) {
