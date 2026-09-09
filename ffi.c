@@ -3187,12 +3187,12 @@ static int lua_ffi_gc(lua_State *L)
 {
     struct cdata *cd = luaL_checkudata(L, 1, CDATA_MT);
 
-    if (lua_isnil(L, 2)) {
-        if (cd->gc_ref != LUA_REFNIL) {
-            luaL_unref(L, LUA_REGISTRYINDEX, cd->gc_ref);
-            cd->gc_ref = LUA_REFNIL;
-        }
-    } else {
+    if (cd->gc_ref != LUA_REFNIL) {
+        luaL_unref(L, LUA_REGISTRYINDEX, cd->gc_ref);
+        cd->gc_ref = LUA_REFNIL;
+    }
+
+    if (!lua_isnil(L, 2)) {
         lua_pushvalue(L, 2);
         cd->gc_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     }
