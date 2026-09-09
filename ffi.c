@@ -2388,18 +2388,19 @@ static int cparse_record(lua_State *L, struct ctype *ct, bool is_union)
 
         if (is_union) {
             for (i = 0; i < nfield; i++) {
-                if (!ctype_is_zero_array(fields[i]->ct)) {
-                    ffi_type *ft = ctype_ft(fields[i]->ct);
+                ffi_type *ft = ctype_ft(fields[i]->ct);
 
-                    if (i == 0 || ft->size > elements[0]->size)
-                        elements[0] = ft;
+                if (ft->alignment > union_alignment)
+                    union_alignment = ft->alignment;
 
-                    if (ft->alignment > union_alignment)
-                        union_alignment = ft->alignment;
+                if (ctype_is_zero_array(fields[i]->ct))
+                    continue;
 
-                    if (ft->size > union_size)
-                        union_size = ft->size;
-                }
+                if (!elements[0] || ft->size > elements[0]->size)
+                    elements[0] = ft;
+
+                if (ft->size > union_size)
+                    union_size = ft->size;
             }
 
             if (!elements[0])
