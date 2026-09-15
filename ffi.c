@@ -983,38 +983,56 @@ static lua_Number from_lua_num_num(lua_State *L, int idx)
 
 static void ft_from_lua_num(lua_State *L, ffi_type *ft, void *ptr, int idx)
 {
+    union {
+        int8_t s8;
+        uint8_t u8;
+        int16_t s16;
+        uint16_t u16;
+        int32_t s32;
+        uint32_t u32;
+        int64_t s64;
+        uint64_t u64;
+        float f;
+        double d;
+    } value;
+
+    /* Packed record members may not satisfy the scalar type's alignment. */
     switch (ft->type) {
     case FFI_TYPE_SINT8:
-        *(int8_t *)ptr = from_lua_num_int(L, idx);
+        value.s8 = from_lua_num_int(L, idx);
         break;
     case FFI_TYPE_UINT8:
-        *(uint8_t *)ptr = from_lua_num_int(L, idx);
+        value.u8 = from_lua_num_int(L, idx);
         break;
     case FFI_TYPE_SINT16:
-        *(int16_t *)ptr = from_lua_num_int(L, idx);
+        value.s16 = from_lua_num_int(L, idx);
         break;
     case FFI_TYPE_UINT16:
-        *(uint16_t *)ptr = from_lua_num_int(L, idx);
+        value.u16 = from_lua_num_int(L, idx);
         break;
     case FFI_TYPE_SINT32:
-        *(int32_t *)ptr = from_lua_num_int(L, idx);
+        value.s32 = from_lua_num_int(L, idx);
         break;
     case FFI_TYPE_UINT32:
-        *(uint32_t *)ptr = from_lua_num_int(L, idx);
+        value.u32 = from_lua_num_int(L, idx);
         break;
     case FFI_TYPE_SINT64:
-        *(int64_t *)ptr = from_lua_num_int(L, idx);
+        value.s64 = from_lua_num_int(L, idx);
         break;
     case FFI_TYPE_UINT64:
-        *(uint64_t *)ptr = from_lua_num_int(L, idx);
+        value.u64 = from_lua_num_int(L, idx);
         break;
     case FFI_TYPE_FLOAT:
-        *(float *)ptr = from_lua_num_num(L, idx);
+        value.f = from_lua_num_num(L, idx);
         break;
     case FFI_TYPE_DOUBLE:
-        *(double *)ptr = from_lua_num_num(L, idx);
+        value.d = from_lua_num_num(L, idx);
         break;
+    default:
+        return;
     }
+
+    memcpy(ptr, &value, ft->size);
 }
 
 static bool cdata_from_lua_num(lua_State *L, struct ctype *ct, void *ptr, int idx, bool cast)

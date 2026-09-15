@@ -320,6 +320,38 @@ local tests = {
         assert(ffi.sizeof(p) == ffi.sizeof('struct Point'))
     end,
     function()
+        local cases = {
+            {'int8_t', -101},
+            {'uint8_t', 201},
+            {'int16_t', -12345},
+            {'uint16_t', 54321},
+            {'int32_t', -123456789},
+            {'uint32_t', 3456789012},
+            {'int64_t', -1234567890123},
+            {'uint64_t', 3456789012345},
+            {'float', -12.5},
+            {'double', 12345.125},
+        }
+
+        for i, case in ipairs(cases) do
+            local name = 'struct packed_scalar_' .. i
+            ffi.cdef(name .. ' { uint8_t before; ' .. case[1] ..
+                ' value; uint8_t after; } __attribute__((packed));')
+            assert(ffi.offsetof(name, 'value') == 1)
+
+            -- Both initialization and assignment must accept an unaligned destination.
+            local p = ffi.new(name, {0x5a, case[2], 0xa5})
+            assert(p.value == case[2])
+            assert(p.before == 0x5a and p.after == 0xa5)
+
+            p.value = 0
+            assert(p.value == 0)
+            p.value = case[2]
+            assert(p.value == case[2])
+            assert(p.before == 0x5a and p.after == 0xa5)
+        end
+    end,
+    function()
         local lib = ffi.load(LIB_PATH)
 
         local bf = ffi.new('struct bitfield_u')
