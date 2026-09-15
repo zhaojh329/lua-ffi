@@ -47,6 +47,10 @@ ffi.cdef([[
 - `cdef` 仅用于声明（不支持函数定义）。
 - 当前位域限制：匿名位域（如 `:0`）、同一记录内混合整型基础类型位域、以及 union 位域会被拒绝。
 - 当前不支持把“包含位域的结构体”按值用于 C 函数调用或回调签名。
+- 位域布局支持 GCC 和 Clang 的默认 Linux ABI：i686、x86-64（LP64）、ARM EABI（小端）、AArch64（小端、LP64）、MIPS o32（大小端）及 RISC-V64 LP64D。其他目标 ABI 会拒绝位域声明。
+- 命名位域可以与普通成员混排，也可以用于 packed 结构体、嵌套记录和数组；读写仅访问字段实际占用的字节。
+- 不支持改变 ABI 的 `-mms-bitfields`、`-fpack-struct`、`-funsigned-bitfields` 或 `#pragma pack`。声明与 C 库必须使用相同 ABI 和打包属性。位域读写针对普通内存，不提供 volatile/MMIO 的访问宽度保证。
+- 普通 `char` 的符号性跟随目标编译器；`signed char` 和 `unsigned char` 显式指定符号性。同基础类型的整数 cdata 赋给位域时保留全部整数位；读取为 Lua 数值时仍受 Lua 整数范围和浮点精度限制。
 
 ### 默认支持的基础类型
 
@@ -180,7 +184,7 @@ local sz = ffi.sizeof("struct Point")
 
 ## `ffi.offsetof(ct, field)`
 
-返回记录类型字段偏移。
+返回记录字段的字节偏移。位域返回其首个占用字节的偏移，仍只有一个返回值，不返回位偏移或宽度。
 
 ```lua
 local off = ffi.offsetof("struct Point", "y")

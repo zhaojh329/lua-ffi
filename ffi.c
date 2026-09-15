@@ -35,6 +35,7 @@ enum {
 
     CTYPE_CHAR,
     CTYPE_UCHAR,
+    CTYPE_SCHAR,
 
     CTYPE_SHORT,
     CTYPE_USHORT,
@@ -116,7 +117,6 @@ struct crecord_field {
     size_t offset;
     uint8_t bit_offset;
     uint8_t bit_size;
-    uint8_t bit_unit_size;
     char name[0];
 };
 
@@ -280,6 +280,8 @@ static const char *ctype_name(struct ctype *ct)
 
     case CTYPE_CHAR:
         return "char";
+    case CTYPE_SCHAR:
+        return "signed char";
     case CTYPE_SHORT:
         return "short";
     case CTYPE_INT:
@@ -467,16 +469,6 @@ static uint64_t cdata_load_uint(const void *ptr, uint8_t size)
     case 4: { uint32_t v; memcpy(&v, ptr, 4); return v; }
     case 8: { uint64_t v; memcpy(&v, ptr, 8); return v; }
     default: return 0;
-    }
-}
-
-static void cdata_store_uint(void *ptr, uint8_t size, uint64_t value)
-{
-    switch (size) {
-    case 1: { uint8_t v  = (uint8_t)value;  memcpy(ptr, &v, 1); break; }
-    case 2: { uint16_t v = (uint16_t)value; memcpy(ptr, &v, 2); break; }
-    case 4: { uint32_t v = (uint32_t)value; memcpy(ptr, &v, 4); break; }
-    case 8: { memcpy(ptr, &value, 8); break; }
     }
 }
 
@@ -846,13 +838,38 @@ static int __ctype_tostring(lua_State *L, struct ctype *ct)
 
 static int cdata_from_lua(lua_State *L, struct ctype *ct, void *ptr, int idx, bool cast);
 
+/* bit_offset counts from the ABI's first bit in the first occupied byte. */
+static uint64_t cdata_read_bitfield(struct crecord_field *field, const void *ptr)
+{
+    const unsigned char *bytes = ptr;
+    uint64_t value = 0;
+    unsigned int i;
+
+    for (i = 0; i < field->bit_size; i++) {
+        unsigned int bit = field->bit_offset + i;
+
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        unsigned int shift = 7 - bit % 8;
+        unsigned int value_bit = field->bit_size - 1 - i;
+#else
+        unsigned int shift = bit % 8;
+        unsigned int value_bit = i;
+#endif
+
+        value |= (uint64_t)((bytes[bit / 8] >> shift) & 1) << value_bit;
+    }
+
+    return value;
+}
+
 static int cdata_to_lua_bitfield(lua_State *L, struct crecord_field *field, void *ptr)
 {
-    uint64_t raw;
-    uint64_t value;
+    uint64_t value = cdata_read_bitfield(field, ptr);
 
-    raw = cdata_load_uint(ptr, field->bit_unit_size);
-    value = (raw >> field->bit_offset) & bit_mask_u64(field->bit_size);
+    if (field->ct->type == CTYPE_BOOL) {
+        lua_pushboolean(L, value != 0);
+        return 1;
+    }
 
     if (ctype_is_signed_int(field->ct)) {
         uint64_t sign = 1ULL << (field->bit_size - 1);
@@ -860,29 +877,59 @@ static int cdata_to_lua_bitfield(lua_State *L, struct crecord_field *field, void
         if (value & sign)
             value |= ~bit_mask_u64(field->bit_size);
 
-        lua_pushinteger(L, (lua_Integer)(int64_t)value);
-    } else {
-        lua_pushinteger(L, (lua_Integer)value);
+        if (sizeof(lua_Integer) < sizeof(int64_t))
+            lua_pushnumber(L, (lua_Number)(int64_t)value);
+        else
+            lua_pushinteger(L, (lua_Integer)(int64_t)value);
+
+        return 1;
     }
 
+#if LUA_VERSION_NUM >= 503
+    if (value <= (uint64_t)LUA_MAXINTEGER) {
+        lua_pushinteger(L, (lua_Integer)value);
+        return 1;
+    }
+#endif
+
+    lua_pushnumber(L, (lua_Number)value);
     return 1;
 }
 
 static int cdata_from_lua_bitfield(lua_State *L, struct crecord_field *field,
         void *ptr, int idx)
 {
-    uint64_t raw;
+    struct cdata *cd = luaL_testudata(L, idx, CDATA_MT);
+    unsigned char *bytes = ptr;
     uint64_t value;
-    uint64_t mask = bit_mask_u64(field->bit_size);
-    uint64_t in = 0;
+    unsigned int i;
 
-    cdata_from_lua(L, field->ct, &in, idx, false);
+    /* Preserve all integer bits instead of converting exact cdata via a Lua number. */
+    if (cd && ctype_equal(cd->ct, field->ct))
+        value = cdata_load_uint(cdata_ptr(cd), ctype_sizeof(field->ct));
+    else {
+        uint64_t in = 0;
 
-    value = cdata_load_uint(&in, field->bit_unit_size) & mask;
-    raw = cdata_load_uint(ptr, field->bit_unit_size);
-    raw &= ~(mask << field->bit_offset);
-    raw |= value << field->bit_offset;
-    cdata_store_uint(ptr, field->bit_unit_size, raw);
+        cdata_from_lua(L, field->ct, &in, idx, false);
+        value = cdata_load_uint(&in, ctype_sizeof(field->ct));
+    }
+
+    /* Touch only occupied bytes, including a ninth byte for packed 64-bit fields. */
+    for (i = 0; i < field->bit_size; i++) {
+        unsigned int bit = field->bit_offset + i;
+
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        unsigned int shift = 7 - bit % 8;
+        unsigned int value_bit = field->bit_size - 1 - i;
+#else
+        unsigned int shift = bit % 8;
+        unsigned int value_bit = i;
+#endif
+        unsigned char mask = 1U << shift;
+
+        bytes[bit / 8] = (bytes[bit / 8] & ~mask)
+                | (((value >> value_bit) & 1) << shift);
+    }
 
     return 0;
 }
@@ -2206,6 +2253,7 @@ static int cparse_record_field(lua_State *L, struct crecord_field **fields)
         }
 
 again:
+        bit_size = 0;
         ct = bt;
 
         tok = cparse_pointer(L, tok, &ct);
@@ -2236,7 +2284,7 @@ again:
             cparse_new_array(L, array_size, &ct);
 
         if (cparse_check_tok(L, tok) == ':') {
-            size_t unit_size;
+            size_t max_bits;
 
             if (ct.type == CTYPE_PTR || ct.type == CTYPE_ARRAY || !ctype_is_int(&ct))
                 return luaL_error(L, "%d:bitfield member '%s' must use integer base type", yyget_lineno(), name);
@@ -2246,12 +2294,12 @@ again:
                 return luaL_error(L, "%d:bitfield member '%s' width expected", yyget_lineno(), name);
 
             bit_size = (int)strtol(yyget_text(), NULL, 10);
-            unit_size = ctype_sizeof(&ct);
+            max_bits = ct.type == CTYPE_BOOL ? 1 : ctype_sizeof(&ct) * 8;
 
             if (bit_size <= 0)
                 return luaL_error(L, "%d:bitfield member '%s' width must be positive", yyget_lineno(), name);
 
-            if (bit_size > (int)(unit_size * 8)) {
+            if (bit_size > (int)max_bits) {
                 return luaL_error(L, "%d:bitfield member '%s' width too large for base type", yyget_lineno(), name);
             }
 
@@ -2261,7 +2309,6 @@ again:
 add:
         field->ct = ctype_lookup(L, &ct, false);
         field->bit_size = bit_size;
-        field->bit_unit_size = bit_size ? ctype_sizeof(field->ct) : 0;
         fields[nfield++] = field;
 
         if (cparse_check_tok(L, tok) == ',') {
@@ -2290,18 +2337,36 @@ static bool crecord_has_bitfield(struct crecord_field **fields, int nfield)
     return false;
 }
 
+static bool cparse_bitfield_abi_supported(void)
+{
+    /* These Linux ABIs share the type-aligned container rule for named fields.
+     * ARM APCS, MIPS n32/n64, x32 and non-default packing are not covered. */
+#if defined(__linux__) && (defined(__GNUC__) || defined(__clang__)) && \
+    (defined(__i386__) || \
+     (defined(__x86_64__) && !defined(__ILP32__)) || \
+     (defined(__arm__) && defined(__ARM_EABI__) && \
+      __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) || \
+     (defined(__aarch64__) && !defined(__ILP32__) && \
+      __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) || \
+     (defined(__mips__) && defined(_ABIO32) && _MIPS_SIM == _ABIO32) || \
+     (defined(__riscv) && __riscv_xlen == 64 && defined(__riscv_float_abi_double)))
+    return true;
+#else
+    return false;
+#endif
+}
+
 static void cparse_record_bitfield_layout(lua_State *L, struct crecord *rc)
 {
-    size_t size = 0;
+    size_t bits = 0;
     size_t alignment = 1;
-    struct ctype *bf_ct = NULL;
-    size_t bf_offset = 0;
-    uint8_t bf_bits = 0;
-    uint8_t bf_size = 0;
     int i;
 
     if (rc->is_union)
         luaL_error(L, "%d:bitfield in union is not supported", yyget_lineno());
+
+    if (!cparse_bitfield_abi_supported())
+        luaL_error(L, "%d:bitfield layout is not supported on this target ABI", yyget_lineno());
 
     for (i = 0; i < rc->nfield; i++) {
         struct crecord_field *field = rc->fields[i];
@@ -2311,64 +2376,30 @@ static void cparse_record_bitfield_layout(lua_State *L, struct crecord *rc)
             alignment = field_align;
 
         if (field->bit_size) {
-            uint8_t unit_bits = field->bit_unit_size * 8;
-            bool reuse = false;
+            size_t unit_bits = ctype_sizeof(field->ct) * 8;
+            size_t align_bits = field_align * 8;
 
-            if (bf_ct == field->ct && bf_bits + field->bit_size <= unit_bits)
-                reuse = true;
+            /* A non-packed field must fit in a suitably aligned container;
+             * its start need not itself be aligned to the base type. */
+            if (!rc->packed && bits % align_bits + field->bit_size > unit_bits)
+                bits = align_up(bits, align_bits);
 
-            if (!reuse) {
-                if (bf_ct && size < bf_offset + bf_size)
-                    size = bf_offset + bf_size;
-
-                size = align_up(size, field_align);
-                bf_offset = size;
-                bf_bits = 0;
-                bf_size = field->bit_unit_size;
-                bf_ct = field->ct;
-            }
-
-            field->offset = bf_offset;
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-            field->bit_offset = unit_bits - bf_bits - field->bit_size;
-#else
-            field->bit_offset = bf_bits;
-#endif
-            bf_bits += field->bit_size;
-
-            if (bf_bits == unit_bits) {
-                size = bf_offset + bf_size;
-                bf_ct = NULL;
-                bf_bits = 0;
-                bf_size = 0;
-            }
-
+            field->offset = bits / 8;
+            field->bit_offset = bits % 8;
+            bits += field->bit_size;
             continue;
         }
 
-        if (bf_ct && size < bf_offset + bf_size) {
-            size = bf_offset + bf_size;
-            bf_ct = NULL;
-            bf_bits = 0;
-            bf_size = 0;
-        }
-
-        size = align_up(size, field_align);
-        field->offset = size;
+        field->offset = align_up((bits + 7) / 8, field_align);
+        bits = field->offset * 8;
 
         if (!ctype_is_zero_array(field->ct))
-            size += ctype_sizeof(field->ct);
+            bits += ctype_sizeof(field->ct) * 8;
     }
-
-    if (bf_ct && size < bf_offset + bf_size)
-        size = bf_offset + bf_size;
-
-    if (!rc->packed)
-        size = align_up(size, alignment);
 
     rc->ft.type = FFI_TYPE_STRUCT;
     rc->ft.alignment = alignment;
-    rc->ft.size = size;
+    rc->ft.size = align_up((bits + 7) / 8, alignment);
 }
 
 static void cparse_record_packed_layout(struct crecord *rc)
@@ -2592,6 +2623,8 @@ static int cparse_basetype(lua_State *L, int tok, struct ctype *ct)
         switch (tok) {
         case TOK_CHAR:
             tok = cparse_squals(CTYPE_CHAR, squals, ct, &ffi_type_schar, &ffi_type_uchar);
+            if (squals == TOK_SIGNED)
+                ct->type = CTYPE_SCHAR;
             break;
         case TOK_SHORT:
             tok = cparse_squals(CTYPE_SHORT, squals, ct, &ffi_type_sshort, &ffi_type_ushort);
@@ -2626,7 +2659,11 @@ static int cparse_basetype(lua_State *L, int tok, struct ctype *ct)
         case TOK_BOOL:
             INIT_TYPE(CTYPE_BOOL, ffi_type_sint8);
         case TOK_CHAR:
+#ifdef __CHAR_UNSIGNED__
+            INIT_TYPE(CTYPE_CHAR, ffi_type_uchar);
+#else
             INIT_TYPE(CTYPE_CHAR, ffi_type_schar);
+#endif
         case TOK_SHORT:
             INIT_TYPE(CTYPE_SHORT, ffi_type_sshort);
         case TOK_INT:

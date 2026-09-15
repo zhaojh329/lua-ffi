@@ -47,6 +47,10 @@ ffi.cdef([[
 - `cdef` is for declarations only (no function definitions).
 - Current bitfield limits: anonymous bitfields (such as `:0`), mixed base integer types in one record, and unions with bitfields are rejected.
 - Calling C functions or callbacks with by-value record types that contain bitfields is currently not supported.
+- Bitfield layout follows the default Linux ABI for GCC and Clang on i686, x86-64 (LP64), ARM EABI (little-endian), AArch64 (little-endian, LP64), MIPS o32 (both endiannesses), and RISC-V64 LP64D. Other target ABIs reject bitfield declarations.
+- Named bitfields can be interleaved with ordinary members and used in packed structs, nested records and arrays. Access touches only the bytes occupied by the field.
+- This does not support ABI-changing options such as `-mms-bitfields`, `-fpack-struct`, `-funsigned-bitfields`, or `#pragma pack`. Declarations and the C library must use the same ABI and packing attributes. Bitfield access is for ordinary memory, not volatile/MMIO access-width guarantees.
+- Plain `char` uses the target compiler's signedness; `signed char` and `unsigned char` remain explicit. Integer cdata of the same base type preserves all bits when assigned to a bitfield. Lua numeric results retain Lua's usual integer range / floating-point precision limits.
 
 ### Default basic types supported
 
@@ -181,7 +185,7 @@ local sz = ffi.sizeof("struct Point")
 
 ## `ffi.offsetof(ct, field)`
 
-Returns field offset for record types.
+Returns the byte offset for record fields. For a bitfield, returns the offset of its first occupied byte (one return value, without a bit offset or width).
 
 ```lua
 local off = ffi.offsetof("struct Point", "y")
