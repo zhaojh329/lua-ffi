@@ -2058,6 +2058,11 @@ static const luaL_Reg clib_methods[] = {
     {NULL, NULL}
 };
 
+enum cparse_mode {
+    CPARSE_DECLARATIONS,
+    CPARSE_TYPE_EXPRESSION
+};
+
 static int cparse_expected_error(lua_State *L, int tok, const char *s)
 {
     if (tok)
@@ -2182,7 +2187,7 @@ static int cparse_packed_attribute(lua_State *L, int tok, bool *is_packed)
     return tok;
 }
 
-static int cparse_basetype(lua_State *L, int tok, struct ctype *ct);
+static int cparse_basetype(lua_State *L, int tok, struct ctype *ct, enum cparse_mode mode);
 
 static void init_ft_struct(lua_State *L, ffi_type *ft, ffi_type **elements, size_t *offsets)
 {
@@ -2217,9 +2222,9 @@ static void check_void_forbidden(lua_State *L, struct ctype *ct, int tok)
         luaL_error(L, "%d:void type in forbidden context", yyget_lineno());
 }
 
-static int cparse_record(lua_State *L, struct ctype *ct, bool is_union);
+static int cparse_record(lua_State *L, struct ctype *ct, bool is_union, enum cparse_mode mode);
 
-static int cparse_record_field(lua_State *L, struct crecord_field **fields)
+static int cparse_record_field(lua_State *L, struct crecord_field **fields, enum cparse_mode mode)
 {
     int nfield = 0;
     int tok, i;
@@ -2238,7 +2243,7 @@ static int cparse_record_field(lua_State *L, struct crecord_field **fields)
             return nfield;
 
         if (cparse_check_tok(L, tok) == TOK_STRUCT || cparse_check_tok(L, tok) == TOK_UNION) {
-            tok = cparse_record(L, &bt, cparse_check_tok(L, tok) == TOK_UNION);
+            tok = cparse_record(L, &bt, cparse_check_tok(L, tok) == TOK_UNION, mode);
             if (tok == ';') {
                 field = calloc(1, sizeof(struct crecord_field) + 1);
                 if (!field)
@@ -2247,7 +2252,7 @@ static int cparse_record_field(lua_State *L, struct crecord_field **fields)
                 goto add;
             }
         } else {
-            tok = cparse_basetype(L, tok, &bt);
+            tok = cparse_basetype(L, tok, &bt, mode);
         }
 
 again:
@@ -2432,7 +2437,7 @@ static void cparse_record_packed_layout(struct crecord *rc)
     rc->ft.size = size;
 }
 
-static int cparse_record(lua_State *L, struct ctype *ct, bool is_union)
+static int cparse_record(lua_State *L, struct ctype *ct, bool is_union, enum cparse_mode mode)
 {
     bool named = false;
     bool packed = false;
@@ -2459,6 +2464,9 @@ static int cparse_record(lua_State *L, struct ctype *ct, bool is_union)
         size_t nfield = 0;
         int i, j, nelement, next_tok;
 
+        if (named && mode == CPARSE_TYPE_EXPRESSION)
+            return luaL_error(L, "%d:named struct/union definitions require ffi.cdef", yyget_lineno());
+
         if (named) {
             lua_rawgetp(L, LUA_REGISTRYINDEX, &crecord_registry);
             lua_pushvalue(L, -2);
@@ -2469,7 +2477,7 @@ static int cparse_record(lua_State *L, struct ctype *ct, bool is_union)
             lua_pop(L, 1);
         }
 
-        nfield = cparse_record_field(L, fields);
+        nfield = cparse_record_field(L, fields, mode);
         next_tok = cparse_packed_attribute(L, yylex(), &packed);
 
         if (crecord_has_bitfield(fields, nfield)) {
@@ -2604,7 +2612,7 @@ static int cparse_squals(int type, int squals, struct ctype *ct, ffi_type *s, ff
     return yylex();
 }
 
-static int cparse_basetype(lua_State *L, int tok, struct ctype *ct)
+static int cparse_basetype(lua_State *L, int tok, struct ctype *ct, enum cparse_mode mode)
 {
     ct->is_const = false;
 
@@ -2639,7 +2647,7 @@ static int cparse_basetype(lua_State *L, int tok, struct ctype *ct)
             break;
         }
     } else if (cparse_check_tok(L, tok) == TOK_STRUCT || cparse_check_tok(L, tok) == TOK_UNION) {
-        tok = cparse_record(L, ct, cparse_check_tok(L, tok) == TOK_UNION);
+        tok = cparse_record(L, ct, cparse_check_tok(L, tok) == TOK_UNION, mode);
     } else {
 #define INIT_TYPE(t1, t2) \
             ct->type = t1; \
@@ -2798,9 +2806,10 @@ static void cparse_build_func_type(lua_State *L, struct ctype *rtype,
 }
 
 static int cparse_function_args(lua_State *L, int tok, struct ctype *args,
-        int *narg, bool *va);
+        int *narg, bool *va, enum cparse_mode mode);
 
-static int cparse_function_arg(lua_State *L, int tok, struct ctype *ct, char **name)
+static int cparse_function_arg(lua_State *L, int tok, struct ctype *ct, char **name,
+        enum cparse_mode mode)
 {
     bool flexible = true;
     int array_size;
@@ -2847,7 +2856,7 @@ static int cparse_function_arg(lua_State *L, int tok, struct ctype *ct, char **n
         if (cparse_check_tok(L, tok) != '(')
             return cparse_expected_error(L, tok, "(");
 
-        tok = cparse_function_args(L, tok, fargs, &fnarg, &fva);
+        tok = cparse_function_args(L, tok, fargs, &fnarg, &fva, mode);
 
         cparse_build_func_type(L, ct, fargs, fnarg, fva, &fct);
         *ct = fct;
@@ -2883,7 +2892,7 @@ static int cparse_function_arg(lua_State *L, int tok, struct ctype *ct, char **n
 }
 
 static int cparse_function_args(lua_State *L, int tok, struct ctype *args,
-        int *narg, bool *va)
+        int *narg, bool *va, enum cparse_mode mode)
 {
     *narg = 0;
     *va = false;
@@ -2897,7 +2906,7 @@ static int cparse_function_args(lua_State *L, int tok, struct ctype *args,
             return luaL_error(L, "%d:too many arguments", yyget_lineno());
 
         if (cparse_check_tok(L, tok) == TOK_STRUCT || cparse_check_tok(L, tok) == TOK_UNION) {
-            tok = cparse_record(L, &args[*narg], cparse_check_tok(L, tok) == TOK_UNION);
+            tok = cparse_record(L, &args[*narg], cparse_check_tok(L, tok) == TOK_UNION, mode);
         } else if (cparse_check_tok(L, tok) == TOK_VAL) {
             tok = yylex();
             if (cparse_check_tok(L, tok) != ')')
@@ -2905,10 +2914,10 @@ static int cparse_function_args(lua_State *L, int tok, struct ctype *args,
             *va = true;
             break;
         } else {
-            tok = cparse_basetype(L, tok, &args[*narg]);
+            tok = cparse_basetype(L, tok, &args[*narg], mode);
         }
 
-        tok = cparse_function_arg(L, tok, &args[*narg], NULL);
+        tok = cparse_function_arg(L, tok, &args[*narg], NULL, mode);
 
         if (cparse_check_tok(L, tok) == ')') {
             if (args[*narg].type == CTYPE_VOID && *narg == 0)
@@ -2957,7 +2966,7 @@ static int cparse_function(lua_State *L, int tok, struct ctype *rtype)
     if (cparse_check_tok(L, tok) != '(')
         return cparse_expected_error(L, tok, "(");
 
-    tok = cparse_function_args(L, tok, args, &narg, &va);
+    tok = cparse_function_args(L, tok, args, &narg, &va, CPARSE_DECLARATIONS);
 
     tok = yylex();
     if (cparse_check_tok(L, tok) != ';')
@@ -2973,68 +2982,70 @@ static int cparse_function(lua_State *L, int tok, struct ctype *rtype)
     return 0;
 }
 
+static int cparse_typedef(lua_State *L, int tok, struct ctype *ct)
+{
+    char *name = NULL;
+
+    if (cparse_check_tok(L, tok) == '(') {
+        tok = cparse_function_arg(L, tok, ct, &name, CPARSE_DECLARATIONS);
+    } else {
+        tok = cparse_pointer(L, tok, ct);
+
+        if (cparse_check_tok(L, tok) != TOK_NAME)
+            return cparse_expected_error(L, tok, "identifier");
+
+        name = strdup(yyget_text());
+        if (!name)
+            return luaL_error(L, "no mem");
+        tok = yylex();
+    }
+
+    if (!name)
+        return cparse_expected_error(L, tok, "identifier");
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &ctdef_registry);
+    lua_getfield(L, -1, name);
+
+    if (!lua_isnil(L, -1)) {
+        return luaL_error(L, "%d:redefinition of symbol '%s'", yyget_lineno(), name);
+    }
+
+    lua_pop(L, 1);
+    ctype_lookup(L, ct, true);
+    lua_setfield(L, -2, name);
+    lua_pop(L, 1);
+
+    free(name);
+
+    if (cparse_check_tok(L, tok) != ';')
+        return cparse_expected_error(L, tok, ";");
+
+    return 0;
+}
+
 static int lua_ffi_cdef_parse(lua_State *L)
 {
     int tok;
 
     while ((tok = yylex())) {
-        bool tdef = false;
+        bool is_typedef = tok == TOK_TYPEDEF;
         struct ctype ct;
 
-        if (cparse_check_tok(L, tok) == ';')
+        if (tok == ';')
             continue;
 
-        if (cparse_check_tok(L, tok) == TOK_TYPEDEF) {
-            tdef = true;
+        if (is_typedef)
             tok = yylex();
-        }
 
-        tok = cparse_basetype(L, tok, &ct);
+        tok = cparse_basetype(L, tok, &ct, CPARSE_DECLARATIONS);
 
-        if (tdef) {
-            char *name = NULL;
-
-            if (cparse_check_tok(L, tok) == '(') {
-                tok = cparse_function_arg(L, tok, &ct, &name);
-            } else {
-                tok = cparse_pointer(L, tok, &ct);
-
-                if (cparse_check_tok(L, tok) != TOK_NAME)
-                    return cparse_expected_error(L, tok, "identifier");
-
-                name = strdup(yyget_text());
-                if (!name)
-                    return luaL_error(L, "no mem");
-                tok = yylex();
-            }
-
-            if (!name)
-                return cparse_expected_error(L, tok, "identifier");
-
-            lua_rawgetp(L, LUA_REGISTRYINDEX, &ctdef_registry);
-            lua_getfield(L, -1, name);
-
-            if (!lua_isnil(L, -1)) {
-                return luaL_error(L, "%d:redefinition of symbol '%s'", yyget_lineno(), name);
-            }
-
-            lua_pop(L, 1);
-            ctype_lookup(L, &ct, true);
-            lua_setfield(L, -2, name);
-            lua_pop(L, 1);
-
-            free(name);
-
-            if (cparse_check_tok(L, tok) != ';')
-                return cparse_expected_error(L, tok, ";");
-
+        if (is_typedef) {
+            cparse_typedef(L, tok, &ct);
             continue;
         }
 
-        if (cparse_check_tok(L, tok) == ';')
-            continue;
-
-        cparse_function(L, tok, &ct);
+        if (cparse_check_tok(L, tok) != ';')
+            cparse_function(L, tok, &ct);
     }
 
     cparse_check_tok(L, tok);
@@ -3117,10 +3128,10 @@ static int lua_check_ct_parse(lua_State *L)
     struct cparse_type_context *ctx = lua_touserdata(L, 1);
     int tok;
 
-    tok = cparse_basetype(L, yylex(), &ctx->match);
+    tok = cparse_basetype(L, yylex(), &ctx->match, CPARSE_TYPE_EXPRESSION);
 
     if (cparse_check_tok(L, tok) == '(') {
-        tok = cparse_function_arg(L, tok, &ctx->match, NULL);
+        tok = cparse_function_arg(L, tok, &ctx->match, NULL, CPARSE_TYPE_EXPRESSION);
     } else {
         tok = cparse_pointer(L, tok, &ctx->match);
         tok = cparse_array(L, tok, &ctx->flexible, &ctx->array_size);

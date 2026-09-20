@@ -207,6 +207,53 @@ local tests = {
         assert(tostring(ffi.typeof('md5_ctx_t')) == 'ctype<struct md5_ctx>')
     end,
     function()
+        local checks = {
+            {'struct', 'typeof_defined_tag', function(ct) return ffi.typeof(ct) end},
+            {'union', 'new_defined_tag', function(ct) return ffi.new(ct) end},
+            {'struct', 'sizeof_defined_tag', function(ct) return ffi.sizeof(ct) end},
+            {'union', 'istype_defined_tag', function(ct) return ffi.istype(ct, ffi.new('int')) end},
+            {'struct', 'cast_defined_tag', function(ct) return ffi.cast(ct, 0) end},
+            {'union', 'offsetof_defined_tag', function(ct) return ffi.offsetof(ct, 'x') end},
+        }
+
+        for _, check in ipairs(checks) do
+            local kind, name, use_type = check[1], check[2], check[3]
+
+            expect_error(function()
+                use_type(kind .. ' ' .. name .. ' { int x; }')
+            end, 'require ffi.cdef')
+
+            expect_error(function()
+                ffi.typeof(kind .. ' ' .. name)
+            end, 'undeclared')
+        end
+
+        expect_error(function()
+            ffi.typeof('struct { struct nested_field_tag { int x; } field; }')
+        end, 'require ffi.cdef')
+        expect_error(function()
+            ffi.typeof('struct nested_field_tag')
+        end, 'undeclared')
+
+        expect_error(function()
+            ffi.typeof('int (*)(union nested_arg_tag { int x; })')
+        end, 'require ffi.cdef')
+        expect_error(function()
+            ffi.typeof('union nested_arg_tag')
+        end, 'undeclared')
+
+        assert(ffi.new('struct { int x; }', {7}).x == 7)
+        assert(ffi.sizeof('union { int x; float y; }') >= ffi.sizeof('int'))
+        assert(ffi.typeof('int (*)(int)'))
+        assert(ffi.typeof('Point *'))
+        assert(ffi.typeof('int (*)(struct Point *)'))
+        assert(ffi.sizeof('struct { struct Point value; }') == ffi.sizeof('struct Point'))
+        assert(ffi.istype('struct Point', ffi.new('struct Point')))
+
+        ffi.cdef('struct typeof_defined_tag { int x; };')
+        assert(ffi.sizeof('struct typeof_defined_tag') == ffi.sizeof('int'))
+    end,
+    function()
         assert(type(ffi.VERSION) == 'string')
         assert(#ffi.VERSION > 0)
 
