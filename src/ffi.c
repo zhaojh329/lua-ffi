@@ -15,10 +15,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <dlfcn.h>
-#include <math.h>
 #include <ffi.h>
 
-#include "helper.h"
 #include "config.h"
 #include "token.h"
 #include "lex.h"
