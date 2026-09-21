@@ -35,6 +35,7 @@ ffi.cdef([[
 - Basic C scalar types supported by this project.
 - `typedef` declarations.
 - `struct` and `union` declarations (including nested/anonymous members).
+- Named and anonymous `enum` declarations, including integer constant expressions.
 - Packed attribute parsing (`__attribute__((packed))`).
 - Struct bitfields with named members for a shared integer base type (for example `unsigned int a:3; unsigned int b:5;`).
 - Function declarations and function pointer types.
@@ -45,6 +46,16 @@ ffi.cdef([[
 - Declarations are additive.
 - Redefinition of known symbols is rejected.
 - `cdef` is for declarations only (no function definitions).
+- Enum definitions belong in `ffi.cdef`; type expressions may reference an enum tag
+  after it has been defined.
+- Enum constants accept decimal, octal and hexadecimal integer literals with
+  `U`/`L`/`LL` suffixes, earlier enum constants, parentheses, arithmetic, shifts,
+  comparisons, logical operators, bitwise operators and `?:`.
+- Enum storage follows the compiler used to build lua-ffi, including
+  `-fshort-enums`. The C library and lua-ffi must use matching enum ABI options.
+- Enum constants outside the exact numeric range of the active Lua version are
+  subject to the same integer-range or floating-point precision limits as other
+  scalar cdata conversions.
 - Current bitfield limits: anonymous bitfields (such as `:0`), mixed base integer types in one record, and unions with bitfields are rejected.
 - Calling C functions or callbacks with by-value record types that contain bitfields is currently not supported.
 - Bitfield layout follows the default Linux ABI for GCC and Clang on i686, x86-64 (LP64), ARM EABI (little-endian), AArch64 (little-endian, LP64), MIPS o32 (both endiannesses), and RISC-V64 LP64D. Other target ABIs reject bitfield declarations.
@@ -73,6 +84,22 @@ Use this object to access declared system C functions.
 ```lua
 ffi.cdef([[ int puts(const char *s); ]])
 ffi.C.puts("hello")
+```
+
+Enum constants are also available through `ffi.C` and every object returned by
+`ffi.load`:
+
+```lua
+ffi.cdef([[
+    enum {
+        COLOR_RED,
+        COLOR_GREEN = 4,
+        COLOR_BLUE
+    };
+]])
+
+assert(ffi.C.COLOR_RED == 0)
+assert(ffi.C.COLOR_BLUE == 5)
 ```
 
 ### `ffi.load(path[, global])`

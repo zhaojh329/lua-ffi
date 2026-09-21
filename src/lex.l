@@ -19,11 +19,14 @@ char *lex_err;
 <COMMENT><<EOF>>        { lex_err = "Unterminated comment"; return 0; }
 "//".*\n                { /* skip for single line comment */ }
 
-[0-9]+                  { return TOK_INTEGER; }
+0[xX][0-9a-fA-F]+[uUlL]* { return TOK_INTEGER; }
+0[0-7]*[uUlL]*          { return TOK_INTEGER; }
+[1-9][0-9]*[uUlL]*      { return TOK_INTEGER; }
 
 "typedef"               { return TOK_TYPEDEF; }
 "struct"                { return TOK_STRUCT; }
 "union"                 { return TOK_UNION; }
+"enum"                  { return TOK_ENUM; }
 
 "const"                 { return TOK_CONST; }
 "signed"                { return TOK_SIGNED; }
@@ -63,7 +66,15 @@ char *lex_err;
 "blkcnt_t"              { return TOK_BLKCNT_T; }
 "time_t"                { return TOK_TIME_T; }
 
-[\?\*(){}\[\],;:]       { return yytext[0]; }
+"<<"                    { return TOK_LSHIFT; }
+">>"                    { return TOK_RSHIFT; }
+"<="                    { return TOK_LE; }
+">="                    { return TOK_GE; }
+"=="                    { return TOK_EQ; }
+"!="                    { return TOK_NE; }
+"&&"                    { return TOK_LAND; }
+"||"                    { return TOK_LOR; }
+[\?\*(){}\[\],;:=+\-\/%~!<>&\^|] { return yytext[0]; }
 [_a-zA-Z][_a-zA-Z0-9]*  { return TOK_NAME; }
 "..."                   { return TOK_VAL; }
 [ \t\n]+                { /* ignore all spaces */ }

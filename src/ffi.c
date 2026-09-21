@@ -10,6 +10,8 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <limits.h>
+#include <errno.h>
 #include <string.h>
 #include <alloca.h>
 #include <stdlib.h>
@@ -72,6 +74,8 @@ enum {
     CTYPE_BLKCNT_T,
     CTYPE_TIME_T,
 
+    CTYPE_ENUM,
+
     CTYPE_FLOAT,
     CTYPE_DOUBLE,
 
@@ -90,6 +94,7 @@ enum {
 struct crecord;
 struct carray;
 struct cfunc;
+struct cenum;
 
 struct ctype {
     uint8_t type;
@@ -98,6 +103,7 @@ struct ctype {
         struct carray *array;
         struct crecord *rc;
         struct cfunc *func;
+        struct cenum *enumeration;
         struct ctype *ptr;
         ffi_type *ft;
     };
@@ -137,6 +143,21 @@ struct cfunc {
     struct ctype *args[0];
 };
 
+struct cenum {
+    ffi_type *ft;
+    uint8_t anonymous:1;
+};
+
+struct cinteger {
+    uint64_t value;
+    uint8_t bits;
+    uint8_t is_unsigned:1;
+};
+
+struct cenum_constant {
+    struct cinteger value;
+};
+
 struct ccallback {
     lua_State *L;
     struct cfunc *func;
@@ -149,6 +170,7 @@ struct ccallback {
 };
 
 static bool ctype_equal(const struct ctype *ct1, const struct ctype *ct2);
+static int64_t cinteger_signed(const struct cinteger *value);
 
 struct cdata {
     struct ctype *ct;
@@ -162,12 +184,54 @@ struct clib {
 };
 
 static const char *crecord_registry;
+static const char *cenum_registry;
+static const char *cenum_constant_registry;
 static const char *carray_registry;
 static const char *cfunc_registry;
 static const char *ctype_registry;
 static const char *ctdef_registry;
 static const char *clib_registry;
 static const char *cdata_refs_mt;
+
+enum cenum_probe_u8 {
+    CENUM_PROBE_U8_MIN = 0,
+    CENUM_PROBE_U8_MAX = UINT8_MAX
+};
+
+enum cenum_probe_s8 {
+    CENUM_PROBE_S8_MIN = INT8_MIN,
+    CENUM_PROBE_S8_MAX = INT8_MAX
+};
+
+enum cenum_probe_u16 {
+    CENUM_PROBE_U16_MIN = 0,
+    CENUM_PROBE_U16_MAX = UINT16_MAX
+};
+
+enum cenum_probe_s16 {
+    CENUM_PROBE_S16_MIN = INT16_MIN,
+    CENUM_PROBE_S16_MAX = INT16_MAX
+};
+
+enum cenum_probe_u32 {
+    CENUM_PROBE_U32_MIN = 0,
+    CENUM_PROBE_U32_MAX = UINT32_MAX
+};
+
+enum cenum_probe_s32 {
+    CENUM_PROBE_S32_MIN = INT32_MIN,
+    CENUM_PROBE_S32_MAX = INT32_MAX
+};
+
+enum cenum_probe_u64 {
+    CENUM_PROBE_U64_MIN = 0,
+    CENUM_PROBE_U64_MAX = UINT64_MAX
+};
+
+enum cenum_probe_s64 {
+    CENUM_PROBE_S64_MIN = INT64_MIN,
+    CENUM_PROBE_S64_MAX = INT64_MAX
+};
 
 #if LUA_VERSION_NUM < 503
 
@@ -270,6 +334,32 @@ static ffi_type *ffi_type_of(size_t size, bool s)
     }
 }
 
+#define CENUM_PROBE_FT(name) \
+    ffi_type_of(sizeof(enum name), (enum name)-1 < (enum name)0)
+
+static ffi_type *cenum_ffi_type(bool has_negative, uint8_t bits)
+{
+    if (has_negative) {
+        if (bits <= 8)
+            return CENUM_PROBE_FT(cenum_probe_s8);
+        if (bits <= 16)
+            return CENUM_PROBE_FT(cenum_probe_s16);
+        if (bits <= 32)
+            return CENUM_PROBE_FT(cenum_probe_s32);
+        return CENUM_PROBE_FT(cenum_probe_s64);
+    }
+
+    if (bits <= 8)
+        return CENUM_PROBE_FT(cenum_probe_u8);
+    if (bits <= 16)
+        return CENUM_PROBE_FT(cenum_probe_u16);
+    if (bits <= 32)
+        return CENUM_PROBE_FT(cenum_probe_u32);
+    return CENUM_PROBE_FT(cenum_probe_u64);
+}
+
+#undef CENUM_PROBE_FT
+
 static const char *ctype_name(struct ctype *ct)
 {
     switch (ct->type) {
@@ -353,6 +443,9 @@ static const char *ctype_name(struct ctype *ct)
     case CTYPE_TIME_T:
         return "time_t";
 
+    case CTYPE_ENUM:
+        return "enum";
+
     case CTYPE_VOID:
         return "void";
     case CTYPE_RECORD:
@@ -376,6 +469,8 @@ static ffi_type *ctype_ft(struct ctype *ct)
         return &ct->array->ft;
     case CTYPE_RECORD:
         return &ct->rc->ft;
+    case CTYPE_ENUM:
+        return ct->enumeration->ft;
     case CTYPE_PTR:
     case CTYPE_FUNC:
         return &ffi_type_pointer;
@@ -586,6 +681,8 @@ static bool ctype_equal(const struct ctype *ct1, const struct ctype *ct2)
     switch (ct1->type) {
     case CTYPE_RECORD:
         return ct1->rc == ct2->rc;
+    case CTYPE_ENUM:
+        return ct1->enumeration == ct2->enumeration;
     case CTYPE_ARRAY:
         if (ct1->array->size != ct2->array->size)
             return false;
@@ -693,6 +790,22 @@ static const char *cstruct_lookup_name(lua_State *L, struct crecord *st)
     return NULL;
 }
 
+static const char *cenum_lookup_name(lua_State *L, struct cenum *enumeration)
+{
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &cenum_registry);
+
+    lua_pushnil(L);
+    while (lua_next(L, -2) != 0) {
+        if (lua_topointer(L, -1) == enumeration) {
+            lua_pop(L, 1);
+            lua_remove(L, -2);
+            return lua_tostring(L, -1);
+        }
+        lua_pop(L, 1);
+    }
+    return NULL;
+}
+
 static void ctype_tostring(lua_State *L, struct ctype *ct, luaL_Buffer *b, bool *first_ptr)
 {
     char buf[128];
@@ -734,6 +847,10 @@ static void ctype_tostring(lua_State *L, struct ctype *ct, luaL_Buffer *b, bool 
         if (ct->type == CTYPE_RECORD && !ct->rc->anonymous) {
             luaL_addchar(b, ' ');
             luaL_addstring(b, cstruct_lookup_name(L, ct->rc));
+            lua_pop(L, 1);
+        } else if (ct->type == CTYPE_ENUM && !ct->enumeration->anonymous) {
+            luaL_addchar(b, ' ');
+            luaL_addstring(b, cenum_lookup_name(L, ct->enumeration));
             lua_pop(L, 1);
         }
         break;
@@ -942,7 +1059,7 @@ static int cdata_to_lua(lua_State *L, struct ctype *ct, void *ptr)
         return 1;
     }
 
-    switch (ct->ft->type) {
+    switch (ctype_ft(ct)->type) {
     case FFI_TYPE_SINT8:
         PUSH_INTEGER(L, int8_t, ptr);
         break;
@@ -1092,7 +1209,7 @@ static bool cdata_from_lua_num(lua_State *L, struct ctype *ct, void *ptr, int id
     if (!ctype_is_num(ct))
         return false;
 
-    ft_from_lua_num(L, ct->ft, ptr, idx);
+    ft_from_lua_num(L, ctype_ft(ct), ptr, idx);
 
     if (ct->type == CTYPE_BOOL)
         *(int8_t *)ptr = !!*(int8_t *)ptr;
@@ -1173,7 +1290,7 @@ static bool cdata_from_lua_cb_ret(lua_State *L, struct ctype *ct, void *ptr, int
     case LUA_TNUMBER:
     case LUA_TBOOLEAN:
         if (ctype_is_num(ct)) {
-            ft_from_lua_num(L, ct->ft, ptr, idx);
+            ft_from_lua_num(L, ctype_ft(ct), ptr, idx);
             if (ct->type == CTYPE_BOOL)
                 *(int8_t *)ptr = !!*(int8_t *)ptr;
             return true;
@@ -1233,7 +1350,7 @@ static bool cdata_from_lua_cb_ret(lua_State *L, struct ctype *ct, void *ptr, int
         default:
             if (ctype_is_num(cd->ct) && ctype_is_num(ct)) {
                 cdata_to_lua(L, cd->ct, cdata_ptr(cd));
-                ft_from_lua_num(L, ct->ft, ptr, -1);
+                ft_from_lua_num(L, ctype_ft(ct), ptr, -1);
                 if (ct->type == CTYPE_BOOL)
                     *(int8_t *)ptr = !!*(int8_t *)ptr;
                 lua_pop(L, 1);
@@ -1978,6 +2095,8 @@ static int ctype_gc(lua_State *L)
             luaL_unref(L, LUA_REGISTRYINDEX, ct->rc->mt_ref);
 
         free(ct->rc);
+    } else if (type == CTYPE_ENUM && ct->enumeration->anonymous) {
+        free(ct->enumeration);
     }
 
     return 0;
@@ -1989,6 +2108,25 @@ static const luaL_Reg ctype_methods[] = {
     {NULL, NULL}
 };
 
+static void cenum_constant_to_lua(lua_State *L, const struct cenum_constant *constant)
+{
+    const struct cinteger *value = &constant->value;
+
+    if (!value->is_unsigned) {
+        lua_pushinteger(L, cinteger_signed(value));
+        return;
+    }
+
+#if LUA_VERSION_NUM >= 503
+    if (value->value <= (uint64_t)LUA_MAXINTEGER) {
+        lua_pushinteger(L, value->value);
+        return;
+    }
+#endif
+
+    lua_pushnumber(L, (lua_Number)value->value);
+}
+
 static int clib_index(lua_State *L)
 {
     struct clib *lib = luaL_checkudata(L, 1, CLIB_MT);
@@ -1996,12 +2134,27 @@ static int clib_index(lua_State *L)
     struct ctype match = { .type = CTYPE_FUNC };
     struct ctype *ct;
     void *sym;
+    int cache;
 
     lua_rawgetp(L, LUA_REGISTRYINDEX, lib);
+    cache = lua_absindex(L, -1);
     lua_getfield(L, -1, name);
     if (!lua_isnil(L, -1))
         goto done;
     lua_pop(L, 1);
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &cenum_constant_registry);
+    lua_getfield(L, -1, name);
+    if (!lua_isnil(L, -1)) {
+        struct cenum_constant *constant = lua_touserdata(L, -1);
+
+        lua_pop(L, 2);
+        cenum_constant_to_lua(L, constant);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, cache, name);
+        goto done;
+    }
+    lua_pop(L, 2);
 
     lua_rawgetp(L, LUA_REGISTRYINDEX, &cfunc_registry);
     lua_getfield(L, -1, name);
@@ -2101,6 +2254,615 @@ static inline int cparse_check_tok(lua_State *L, int tok)
     return tok;
 }
 
+static uint64_t cinteger_mask(uint8_t bits)
+{
+    return bits == 64 ? UINT64_MAX : (1ULL << bits) - 1;
+}
+
+static int64_t cinteger_signed(const struct cinteger *value)
+{
+    uint64_t raw = value->value & cinteger_mask(value->bits);
+    uint64_t sign = 1ULL << (value->bits - 1);
+
+    if (!(raw & sign))
+        return (int64_t)raw;
+
+    if (value->bits == 64 && raw == sign)
+        return INT64_MIN;
+
+    return -(int64_t)((~raw & cinteger_mask(value->bits)) + 1);
+}
+
+static struct cinteger cinteger_make(uint64_t value, uint8_t bits, bool is_unsigned)
+{
+    struct cinteger out = {
+        .value = value & cinteger_mask(bits),
+        .bits = bits,
+        .is_unsigned = is_unsigned
+    };
+
+    return out;
+}
+
+static struct cinteger cinteger_from_signed(int64_t value, uint8_t bits)
+{
+    return cinteger_make((uint64_t)value, bits, false);
+}
+
+static bool cinteger_truth(const struct cinteger *value)
+{
+    return (value->value & cinteger_mask(value->bits)) != 0;
+}
+
+static bool cinteger_fits_signed(uint64_t value, uint8_t bits)
+{
+    if (bits == 64)
+        return value <= INT64_MAX;
+    return value <= (1ULL << (bits - 1)) - 1;
+}
+
+static struct cinteger cinteger_convert(struct cinteger value, uint8_t bits, bool is_unsigned)
+{
+    return cinteger_make(value.value, bits, is_unsigned);
+}
+
+static struct cinteger cinteger_promote(struct cinteger value)
+{
+    uint8_t int_bits = sizeof(int) * CHAR_BIT;
+
+    if (value.bits >= int_bits)
+        return value;
+
+    if (!value.is_unsigned || cinteger_fits_signed(cinteger_mask(value.bits), int_bits))
+        return cinteger_convert(value, int_bits, false);
+
+    return cinteger_convert(value, int_bits, true);
+}
+
+static void cinteger_usual(struct cinteger *left, struct cinteger *right)
+{
+    uint8_t bits;
+    bool is_unsigned;
+
+    *left = cinteger_promote(*left);
+    *right = cinteger_promote(*right);
+
+    if (left->is_unsigned == right->is_unsigned) {
+        bits = left->bits > right->bits ? left->bits : right->bits;
+        is_unsigned = left->is_unsigned;
+    } else {
+        struct cinteger *u = left->is_unsigned ? left : right;
+        struct cinteger *s = left->is_unsigned ? right : left;
+
+        if (u->bits >= s->bits) {
+            bits = u->bits;
+            is_unsigned = true;
+        } else {
+            bits = s->bits;
+            is_unsigned = u->bits == s->bits;
+        }
+    }
+
+    *left = cinteger_convert(*left, bits, is_unsigned);
+    *right = cinteger_convert(*right, bits, is_unsigned);
+}
+
+static void cinteger_signed_bounds(uint8_t bits, int64_t *min, int64_t *max)
+{
+    if (bits == 64) {
+        *min = INT64_MIN;
+        *max = INT64_MAX;
+        return;
+    }
+
+    *min = -(1LL << (bits - 1));
+    *max = (1LL << (bits - 1)) - 1;
+}
+
+static struct cinteger cinteger_literal(lua_State *L, const char *text)
+{
+    struct {
+        uint8_t bits;
+        bool is_unsigned;
+    } candidates[6];
+    char suffix[4] = {};
+    char *end;
+    uint64_t value;
+    size_t nsuffix, ncandidate = 0, i;
+    uint8_t int_bits = sizeof(int) * CHAR_BIT;
+    uint8_t long_bits = sizeof(long) * CHAR_BIT;
+    uint8_t ll_bits = sizeof(long long) * CHAR_BIT;
+    bool decimal;
+
+    errno = 0;
+    value = strtoull(text, &end, 0);
+    if (errno == ERANGE)
+        luaL_error(L, "%d:integer constant is too large", yyget_lineno());
+
+    nsuffix = strlen(end);
+    if (nsuffix >= sizeof(suffix))
+        luaL_error(L, "%d:invalid integer suffix '%s'", yyget_lineno(), end);
+
+    for (i = 0; i < nsuffix; i++) {
+        char c = end[i];
+        suffix[i] = c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c;
+    }
+
+    if (strcmp(suffix, "") && strcmp(suffix, "u") && strcmp(suffix, "l")
+            && strcmp(suffix, "ul") && strcmp(suffix, "lu") && strcmp(suffix, "ll")
+            && strcmp(suffix, "ull") && strcmp(suffix, "llu")) {
+        luaL_error(L, "%d:invalid integer suffix '%s'", yyget_lineno(), end);
+    }
+
+    decimal = text[0] != '0' || text[1] == '\0'
+        || (text[1] != 'x' && text[1] != 'X' && text[1] >= '8');
+
+#define ADD_CANDIDATE(width, u) \
+    do { \
+        candidates[ncandidate].bits = width; \
+        candidates[ncandidate].is_unsigned = u; \
+        ncandidate++; \
+    } while (0)
+
+    if (!strcmp(suffix, "u")) {
+        ADD_CANDIDATE(int_bits, true);
+        ADD_CANDIDATE(long_bits, true);
+        ADD_CANDIDATE(ll_bits, true);
+    } else if (!strcmp(suffix, "l")) {
+        ADD_CANDIDATE(long_bits, false);
+        if (!decimal)
+            ADD_CANDIDATE(long_bits, true);
+        ADD_CANDIDATE(ll_bits, false);
+        if (!decimal)
+            ADD_CANDIDATE(ll_bits, true);
+    } else if (!strcmp(suffix, "ul") || !strcmp(suffix, "lu")) {
+        ADD_CANDIDATE(long_bits, true);
+        ADD_CANDIDATE(ll_bits, true);
+    } else if (!strcmp(suffix, "ll")) {
+        ADD_CANDIDATE(ll_bits, false);
+        if (!decimal)
+            ADD_CANDIDATE(ll_bits, true);
+    } else if (!strcmp(suffix, "ull") || !strcmp(suffix, "llu")) {
+        ADD_CANDIDATE(ll_bits, true);
+    } else {
+        ADD_CANDIDATE(int_bits, false);
+        if (!decimal)
+            ADD_CANDIDATE(int_bits, true);
+        ADD_CANDIDATE(long_bits, false);
+        if (!decimal)
+            ADD_CANDIDATE(long_bits, true);
+        ADD_CANDIDATE(ll_bits, false);
+        if (!decimal)
+            ADD_CANDIDATE(ll_bits, true);
+    }
+
+#undef ADD_CANDIDATE
+
+    for (i = 0; i < ncandidate; i++) {
+        if (candidates[i].is_unsigned) {
+            if (candidates[i].bits == 64 || value <= cinteger_mask(candidates[i].bits))
+                return cinteger_make(value, candidates[i].bits, true);
+        } else if (cinteger_fits_signed(value, candidates[i].bits)) {
+            return cinteger_make(value, candidates[i].bits, false);
+        }
+    }
+
+    luaL_error(L, "%d:integer constant is not representable", yyget_lineno());
+    return cinteger_make(0, int_bits, false);
+}
+
+static bool cparse_enum_constant_lookup(lua_State *L, int members, const char *name,
+        struct cinteger *value)
+{
+    struct cenum_constant *constant;
+
+    if (members) {
+        lua_getfield(L, members, name);
+        constant = lua_touserdata(L, -1);
+        if (constant) {
+            *value = constant->value;
+            lua_pop(L, 1);
+            return true;
+        }
+        lua_pop(L, 1);
+    }
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &cenum_constant_registry);
+    lua_getfield(L, -1, name);
+    constant = lua_touserdata(L, -1);
+    if (constant)
+        *value = constant->value;
+    lua_pop(L, 2);
+
+    return constant != NULL;
+}
+
+static int cparse_enum_expression(lua_State *L, int tok, int members,
+        struct cinteger *value, bool evaluate);
+
+static int cparse_enum_primary(lua_State *L, int tok, int members,
+        struct cinteger *value, bool evaluate)
+{
+    if (cparse_check_tok(L, tok) == TOK_INTEGER) {
+        *value = cinteger_literal(L, yyget_text());
+        return yylex();
+    }
+
+    if (cparse_check_tok(L, tok) == TOK_NAME) {
+        if (!cparse_enum_constant_lookup(L, members, yyget_text(), value))
+            return luaL_error(L, "%d:unknown enum constant '%s'", yyget_lineno(), yyget_text());
+        return yylex();
+    }
+
+    if (cparse_check_tok(L, tok) == '(') {
+        tok = cparse_enum_expression(L, yylex(), members, value, evaluate);
+        if (cparse_check_tok(L, tok) != ')')
+            return cparse_expected_error(L, tok, ")");
+        return yylex();
+    }
+
+    return cparse_expected_error(L, tok, "integer constant");
+}
+
+static int cparse_enum_unary(lua_State *L, int tok, int members,
+        struct cinteger *value, bool evaluate)
+{
+    int op = cparse_check_tok(L, tok);
+    int64_t signed_value;
+    int64_t min, max;
+
+    if (op != '+' && op != '-' && op != '~' && op != '!')
+        return cparse_enum_primary(L, tok, members, value, evaluate);
+
+    tok = cparse_enum_unary(L, yylex(), members, value, evaluate);
+    *value = cinteger_promote(*value);
+
+    if (!evaluate) {
+        if (op == '!')
+            *value = cinteger_from_signed(0, sizeof(int) * CHAR_BIT);
+        else
+            value->value = 0;
+        return tok;
+    }
+
+    if (op == '+')
+        return tok;
+
+    if (op == '!') {
+        *value = cinteger_from_signed(!cinteger_truth(value), sizeof(int) * CHAR_BIT);
+        return tok;
+    }
+
+    if (op == '~') {
+        value->value = ~value->value & cinteger_mask(value->bits);
+        return tok;
+    }
+
+    if (value->is_unsigned) {
+        value->value = -value->value & cinteger_mask(value->bits);
+        return tok;
+    }
+
+    signed_value = cinteger_signed(value);
+    cinteger_signed_bounds(value->bits, &min, &max);
+    if (signed_value == min)
+        return luaL_error(L, "%d:integer constant overflow", yyget_lineno());
+    *value = cinteger_from_signed(-signed_value, value->bits);
+
+    return tok;
+}
+
+static struct cinteger cinteger_mul(lua_State *L, struct cinteger left,
+        struct cinteger right, bool evaluate)
+{
+    int64_t a, b, min, max;
+
+    cinteger_usual(&left, &right);
+    if (!evaluate)
+        return cinteger_make(0, left.bits, left.is_unsigned);
+    if (left.is_unsigned)
+        return cinteger_make(left.value * right.value, left.bits, true);
+
+    a = cinteger_signed(&left);
+    b = cinteger_signed(&right);
+    cinteger_signed_bounds(left.bits, &min, &max);
+
+    if ((a > 0 && ((b > 0 && a > max / b) || (b < 0 && b < min / a)))
+            || (a < 0 && ((b > 0 && a < min / b)
+            || (b < 0 && a != 0 && b < max / a)))) {
+        luaL_error(L, "%d:integer constant overflow", yyget_lineno());
+    }
+
+    return cinteger_from_signed(a * b, left.bits);
+}
+
+static int cparse_enum_multiplicative(lua_State *L, int tok, int members,
+        struct cinteger *value, bool evaluate)
+{
+    struct cinteger right;
+
+    tok = cparse_enum_unary(L, tok, members, value, evaluate);
+    while (tok == '*' || tok == '/' || tok == '%') {
+        int op = tok;
+        int64_t a, b, min, max;
+
+        tok = cparse_enum_unary(L, yylex(), members, &right, evaluate);
+        if (op == '*') {
+            *value = cinteger_mul(L, *value, right, evaluate);
+            continue;
+        }
+
+        cinteger_usual(value, &right);
+        if (!evaluate) {
+            value->value = 0;
+            continue;
+        }
+        if (!cinteger_truth(&right))
+            return luaL_error(L, "%d:division by zero in enum constant", yyget_lineno());
+
+        if (value->is_unsigned) {
+            value->value = op == '/' ? value->value / right.value
+                                     : value->value % right.value;
+            continue;
+        }
+
+        a = cinteger_signed(value);
+        b = cinteger_signed(&right);
+        cinteger_signed_bounds(value->bits, &min, &max);
+        if (a == min && b == -1)
+            return luaL_error(L, "%d:integer constant overflow", yyget_lineno());
+        *value = cinteger_from_signed(op == '/' ? a / b : a % b, value->bits);
+    }
+
+    return tok;
+}
+
+static struct cinteger cinteger_add(lua_State *L, struct cinteger left,
+        struct cinteger right, bool subtract, bool evaluate)
+{
+    int64_t a, b, min, max;
+
+    cinteger_usual(&left, &right);
+    if (!evaluate)
+        return cinteger_make(0, left.bits, left.is_unsigned);
+    if (left.is_unsigned) {
+        uint64_t out = subtract ? left.value - right.value : left.value + right.value;
+        return cinteger_make(out, left.bits, true);
+    }
+
+    a = cinteger_signed(&left);
+    b = cinteger_signed(&right);
+    cinteger_signed_bounds(left.bits, &min, &max);
+
+    if ((!subtract && ((b > 0 && a > max - b) || (b < 0 && a < min - b)))
+            || (subtract && ((b < 0 && a > max + b) || (b > 0 && a < min + b)))) {
+        luaL_error(L, "%d:integer constant overflow", yyget_lineno());
+    }
+
+    return cinteger_from_signed(subtract ? a - b : a + b, left.bits);
+}
+
+static int cparse_enum_additive(lua_State *L, int tok, int members,
+        struct cinteger *value, bool evaluate)
+{
+    struct cinteger right;
+
+    tok = cparse_enum_multiplicative(L, tok, members, value, evaluate);
+    while (tok == '+' || tok == '-') {
+        int op = tok;
+        tok = cparse_enum_multiplicative(L, yylex(), members, &right, evaluate);
+        *value = cinteger_add(L, *value, right, op == '-', evaluate);
+    }
+
+    return tok;
+}
+
+static int cparse_enum_shift(lua_State *L, int tok, int members,
+        struct cinteger *value, bool evaluate)
+{
+    struct cinteger right;
+
+    tok = cparse_enum_additive(L, tok, members, value, evaluate);
+    while (tok == TOK_LSHIFT || tok == TOK_RSHIFT) {
+        int op = tok;
+        int64_t count;
+
+        tok = cparse_enum_additive(L, yylex(), members, &right, evaluate);
+        *value = cinteger_promote(*value);
+        right = cinteger_promote(right);
+        if (!evaluate) {
+            value->value = 0;
+            continue;
+        }
+        if (!right.is_unsigned && cinteger_signed(&right) < 0)
+            return luaL_error(L, "%d:negative shift count", yyget_lineno());
+        count = right.is_unsigned ? (int64_t)right.value : cinteger_signed(&right);
+        if ((uint64_t)count >= value->bits)
+            return luaL_error(L, "%d:shift count is too large", yyget_lineno());
+
+        if (op == TOK_RSHIFT) {
+            if (value->is_unsigned)
+                value->value >>= count;
+            else
+                *value = cinteger_from_signed(cinteger_signed(value) >> count, value->bits);
+        } else if (value->is_unsigned) {
+            value->value = value->value << count & cinteger_mask(value->bits);
+        } else {
+            int64_t current = cinteger_signed(value);
+            int64_t min, max;
+
+            cinteger_signed_bounds(value->bits, &min, &max);
+            if (current < 0 || current > (max >> count))
+                return luaL_error(L, "%d:integer constant overflow", yyget_lineno());
+            *value = cinteger_from_signed(current << count, value->bits);
+        }
+    }
+
+    return tok;
+}
+
+static bool cinteger_compare(struct cinteger left, struct cinteger right, int op)
+{
+    cinteger_usual(&left, &right);
+
+    if (left.is_unsigned) {
+        switch (op) {
+        case '<': return left.value < right.value;
+        case '>': return left.value > right.value;
+        case TOK_LE: return left.value <= right.value;
+        case TOK_GE: return left.value >= right.value;
+        case TOK_EQ: return left.value == right.value;
+        default: return left.value != right.value;
+        }
+    }
+
+    switch (op) {
+    case '<': return cinteger_signed(&left) < cinteger_signed(&right);
+    case '>': return cinteger_signed(&left) > cinteger_signed(&right);
+    case TOK_LE: return cinteger_signed(&left) <= cinteger_signed(&right);
+    case TOK_GE: return cinteger_signed(&left) >= cinteger_signed(&right);
+    case TOK_EQ: return cinteger_signed(&left) == cinteger_signed(&right);
+    default: return cinteger_signed(&left) != cinteger_signed(&right);
+    }
+}
+
+static int cparse_enum_relational(lua_State *L, int tok, int members,
+        struct cinteger *value, bool evaluate)
+{
+    struct cinteger right;
+
+    tok = cparse_enum_shift(L, tok, members, value, evaluate);
+    while (tok == '<' || tok == '>' || tok == TOK_LE || tok == TOK_GE) {
+        int op = tok;
+        tok = cparse_enum_shift(L, yylex(), members, &right, evaluate);
+        *value = cinteger_from_signed(evaluate && cinteger_compare(*value, right, op),
+                sizeof(int) * CHAR_BIT);
+    }
+
+    return tok;
+}
+
+static int cparse_enum_equality(lua_State *L, int tok, int members,
+        struct cinteger *value, bool evaluate)
+{
+    struct cinteger right;
+
+    tok = cparse_enum_relational(L, tok, members, value, evaluate);
+    while (tok == TOK_EQ || tok == TOK_NE) {
+        int op = tok;
+        tok = cparse_enum_relational(L, yylex(), members, &right, evaluate);
+        *value = cinteger_from_signed(evaluate && cinteger_compare(*value, right, op),
+                sizeof(int) * CHAR_BIT);
+    }
+
+    return tok;
+}
+
+static int cparse_enum_bitwise_and(lua_State *L, int tok, int members,
+        struct cinteger *value, bool evaluate)
+{
+    struct cinteger right;
+
+    tok = cparse_enum_equality(L, tok, members, value, evaluate);
+    while (tok == '&') {
+        tok = cparse_enum_equality(L, yylex(), members, &right, evaluate);
+        cinteger_usual(value, &right);
+        value->value = evaluate ? value->value & right.value : 0;
+    }
+
+    return tok;
+}
+
+static int cparse_enum_bitwise_xor(lua_State *L, int tok, int members,
+        struct cinteger *value, bool evaluate)
+{
+    struct cinteger right;
+
+    tok = cparse_enum_bitwise_and(L, tok, members, value, evaluate);
+    while (tok == '^') {
+        tok = cparse_enum_bitwise_and(L, yylex(), members, &right, evaluate);
+        cinteger_usual(value, &right);
+        value->value = evaluate ? value->value ^ right.value : 0;
+    }
+
+    return tok;
+}
+
+static int cparse_enum_bitwise_or(lua_State *L, int tok, int members,
+        struct cinteger *value, bool evaluate)
+{
+    struct cinteger right;
+
+    tok = cparse_enum_bitwise_xor(L, tok, members, value, evaluate);
+    while (tok == '|') {
+        tok = cparse_enum_bitwise_xor(L, yylex(), members, &right, evaluate);
+        cinteger_usual(value, &right);
+        value->value = evaluate ? value->value | right.value : 0;
+    }
+
+    return tok;
+}
+
+static int cparse_enum_logical_and(lua_State *L, int tok, int members,
+        struct cinteger *value, bool evaluate)
+{
+    struct cinteger right;
+
+    tok = cparse_enum_bitwise_or(L, tok, members, value, evaluate);
+    while (tok == TOK_LAND) {
+        bool left = evaluate && cinteger_truth(value);
+        tok = cparse_enum_bitwise_or(L, yylex(), members, &right,
+                evaluate && left);
+        *value = cinteger_from_signed(evaluate && left && cinteger_truth(&right),
+                sizeof(int) * CHAR_BIT);
+    }
+
+    return tok;
+}
+
+static int cparse_enum_logical_or(lua_State *L, int tok, int members,
+        struct cinteger *value, bool evaluate)
+{
+    struct cinteger right;
+
+    tok = cparse_enum_logical_and(L, tok, members, value, evaluate);
+    while (tok == TOK_LOR) {
+        bool left = evaluate && cinteger_truth(value);
+        tok = cparse_enum_logical_and(L, yylex(), members, &right,
+                evaluate && !left);
+        *value = cinteger_from_signed(evaluate && (left || cinteger_truth(&right)),
+                sizeof(int) * CHAR_BIT);
+    }
+
+    return tok;
+}
+
+static int cparse_enum_expression(lua_State *L, int tok, int members,
+        struct cinteger *value, bool evaluate)
+{
+    struct cinteger if_true, if_false;
+    bool condition;
+
+    tok = cparse_enum_logical_or(L, tok, members, value, evaluate);
+    if (tok != '?')
+        return tok;
+
+    condition = evaluate && cinteger_truth(value);
+    tok = cparse_enum_expression(L, yylex(), members, &if_true,
+            evaluate && condition);
+    if (cparse_check_tok(L, tok) != ':')
+        return cparse_expected_error(L, tok, ":");
+    tok = cparse_enum_expression(L, yylex(), members, &if_false,
+            evaluate && !condition);
+    cinteger_usual(&if_true, &if_false);
+    if (evaluate)
+        *value = condition ? if_true : if_false;
+    else
+        *value = cinteger_make(0, if_true.bits, if_true.is_unsigned);
+
+    return tok;
+}
+
 static int cparse_pointer(lua_State *L, int tok, struct ctype *ct)
 {
     while (cparse_check_tok(L, tok) == '*') {
@@ -2134,9 +2896,13 @@ static int cparse_array(lua_State *L, int tok, bool *flexible, int *size)
 
     if (cparse_check_tok(L, tok) == TOK_INTEGER || cparse_check_tok(L, tok) == '?') {
         if (cparse_check_tok(L, tok) == TOK_INTEGER) {
-            *size = atoi(yyget_text());
-            if (*size < 0)
-                return luaL_error(L, "%d:size of array is negative", yyget_lineno());
+            struct cinteger value = cinteger_literal(L, yyget_text());
+            uint64_t length = value.is_unsigned
+                ? value.value : (uint64_t)cinteger_signed(&value);
+
+            if (length > INT_MAX)
+                return luaL_error(L, "%d:size of array is too large", yyget_lineno());
+            *size = (int)length;
         } else {
             *flexible = true;
         }
@@ -2185,6 +2951,232 @@ static int cparse_packed_attribute(lua_State *L, int tok, bool *is_packed)
     }
 
     return tok;
+}
+
+static bool registry_has_name(lua_State *L, const void *registry, const char *name)
+{
+    bool found;
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, registry);
+    lua_getfield(L, -1, name);
+    found = !lua_isnil(L, -1);
+    lua_pop(L, 2);
+
+    return found;
+}
+
+static bool cparse_ordinary_name_exists(lua_State *L, const char *name)
+{
+    return registry_has_name(L, &cenum_constant_registry, name)
+        || registry_has_name(L, &ctdef_registry, name)
+        || registry_has_name(L, &cfunc_registry, name);
+}
+
+static uint8_t cenum_range_bits(lua_State *L, bool has_negative,
+        int64_t min, uint64_t max)
+{
+    if (!has_negative) {
+        if (max <= UINT8_MAX)
+            return 8;
+        if (max <= UINT16_MAX)
+            return 16;
+        if (max <= UINT32_MAX)
+            return 32;
+        return 64;
+    }
+
+    if (max > INT64_MAX)
+        luaL_error(L, "%d:enum range is not representable by a supported C integer type",
+                yyget_lineno());
+
+    if (min >= INT8_MIN && max <= INT8_MAX)
+        return 8;
+    if (min >= INT16_MIN && max <= INT16_MAX)
+        return 16;
+    if (min >= INT32_MIN && max <= INT32_MAX)
+        return 32;
+    return 64;
+}
+
+static void cenum_range_add(const struct cinteger *value, bool *has_negative,
+        int64_t *min, uint64_t *max)
+{
+    if (!value->is_unsigned && cinteger_signed(value) < 0) {
+        int64_t signed_value = cinteger_signed(value);
+
+        if (!*has_negative || signed_value < *min)
+            *min = signed_value;
+        *has_negative = true;
+        return;
+    }
+
+    if (value->is_unsigned) {
+        if (value->value > *max)
+            *max = value->value;
+    } else if ((uint64_t)cinteger_signed(value) > *max) {
+        *max = cinteger_signed(value);
+    }
+}
+
+static void cenum_commit_constants(lua_State *L, int members)
+{
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &cenum_constant_registry);
+
+    lua_pushnil(L);
+    while (lua_next(L, members) != 0) {
+        lua_pushvalue(L, -2);
+        lua_pushvalue(L, -2);
+        lua_settable(L, -5);
+        lua_pop(L, 1);
+    }
+
+    lua_pop(L, 1);
+}
+
+static int cparse_enum(lua_State *L, struct ctype *ct, enum cparse_mode mode)
+{
+    struct cinteger next = cinteger_from_signed(0, sizeof(int) * CHAR_BIT);
+    struct cenum *enumeration;
+    const char *tag = NULL;
+    bool next_valid = true;
+    bool has_negative = false;
+    bool has_member = false;
+    int64_t min = 0;
+    uint64_t max = 0;
+    uint8_t bits;
+    int tag_index = 0;
+    int members;
+    int tok = yylex();
+
+    ct->type = CTYPE_ENUM;
+    if (cparse_check_tok(L, tok) == TOK_NAME) {
+        lua_pushstring(L, yyget_text());
+        tag_index = lua_absindex(L, -1);
+        tag = lua_tostring(L, tag_index);
+        tok = yylex();
+    }
+
+    if (cparse_check_tok(L, tok) != '{') {
+        if (!tag)
+            return cparse_expected_error(L, tok, "identifier or {");
+
+        if (registry_has_name(L, &crecord_registry, tag))
+            return luaL_error(L, "%d:tag '%s' was declared as struct or union",
+                    yyget_lineno(), tag);
+
+        lua_rawgetp(L, LUA_REGISTRYINDEX, &cenum_registry);
+        lua_getfield(L, -1, tag);
+        if (lua_isnil(L, -1))
+            return luaL_error(L, "%d:undeclared enum '%s'", yyget_lineno(), tag);
+
+        ct->enumeration = (struct cenum *)lua_topointer(L, -1);
+        lua_pop(L, 2);
+        lua_remove(L, tag_index);
+        return tok;
+    }
+
+    if (mode == CPARSE_TYPE_EXPRESSION)
+        return luaL_error(L, "%d:enum definitions require ffi.cdef", yyget_lineno());
+
+    if (tag && (registry_has_name(L, &crecord_registry, tag)
+            || registry_has_name(L, &cenum_registry, tag))) {
+        return luaL_error(L, "%d:redefinition of tag '%s'", yyget_lineno(), tag);
+    }
+
+    lua_newtable(L);
+    members = lua_absindex(L, -1);
+    tok = yylex();
+
+    while (cparse_check_tok(L, tok) != '}') {
+        struct cenum_constant *constant;
+        struct cinteger value;
+        const char *name;
+
+        if (cparse_check_tok(L, tok) != TOK_NAME)
+            return cparse_expected_error(L, tok, "enumerator");
+
+        lua_pushstring(L, yyget_text());
+        name = lua_tostring(L, -1);
+
+        lua_getfield(L, members, name);
+        if (!lua_isnil(L, -1))
+            return luaL_error(L, "%d:redefinition of enum constant '%s'",
+                    yyget_lineno(), name);
+        lua_pop(L, 1);
+
+        if (cparse_ordinary_name_exists(L, name))
+            return luaL_error(L, "%d:redefinition of symbol '%s'", yyget_lineno(), name);
+
+        tok = yylex();
+        if (cparse_check_tok(L, tok) == '=') {
+            tok = cparse_enum_expression(L, yylex(), members, &value, true);
+        } else {
+            if (!next_valid)
+                return luaL_error(L, "%d:overflow in enumeration values", yyget_lineno());
+            value = next;
+        }
+
+        constant = lua_newuserdata(L, sizeof(*constant));
+        constant->value = value;
+        lua_settable(L, members);
+
+        has_member = true;
+        cenum_range_add(&value, &has_negative, &min, &max);
+
+        if (value.is_unsigned) {
+            next_valid = value.value != cinteger_mask(value.bits);
+        } else {
+            int64_t value_max = value.bits == 64
+                ? INT64_MAX : (1LL << (value.bits - 1)) - 1;
+
+            next_valid = cinteger_signed(&value) != value_max;
+        }
+
+        if (next_valid) {
+            struct cinteger one = cinteger_from_signed(1, sizeof(int) * CHAR_BIT);
+            next = cinteger_add(L, value, one, false, true);
+        }
+
+        if (cparse_check_tok(L, tok) == '}')
+            break;
+        if (cparse_check_tok(L, tok) != ',')
+            return cparse_expected_error(L, tok, ", or }");
+
+        tok = yylex();
+        if (cparse_check_tok(L, tok) == '}')
+            break;
+    }
+
+    if (!has_member)
+        return luaL_error(L, "%d:enum must contain at least one enumerator", yyget_lineno());
+
+    bits = cenum_range_bits(L, has_negative, min, max);
+    if (tag) {
+        lua_rawgetp(L, LUA_REGISTRYINDEX, &cenum_registry);
+        enumeration = lua_newuserdata(L, sizeof(*enumeration));
+        memset(enumeration, 0, sizeof(*enumeration));
+    } else {
+        enumeration = calloc(1, sizeof(*enumeration));
+        if (!enumeration)
+            return luaL_error(L, "no mem");
+    }
+
+    enumeration->ft = cenum_ffi_type(has_negative, bits);
+    enumeration->anonymous = tag == NULL;
+    ct->enumeration = enumeration;
+
+    if (tag) {
+        lua_setfield(L, -2, tag);
+        lua_pop(L, 1);
+    }
+
+    cenum_commit_constants(L, members);
+
+    lua_remove(L, members);
+    if (tag)
+        lua_remove(L, tag_index);
+
+    return yylex();
 }
 
 static int cparse_basetype(lua_State *L, int tok, struct ctype *ct, enum cparse_mode mode);
@@ -2453,6 +3445,10 @@ static int cparse_record(lua_State *L, struct ctype *ct, bool is_union, enum cpa
         tok = yylex();
     }
 
+    if (named && registry_has_name(L, &cenum_registry, lua_tostring(L, -1)))
+        return luaL_error(L, "%d:tag '%s' was declared as enum",
+                yyget_lineno(), lua_tostring(L, -1));
+
     tok = cparse_packed_attribute(L, tok, &packed);
 
     if (cparse_check_tok(L, tok) == '{') {
@@ -2648,6 +3644,8 @@ static int cparse_basetype(lua_State *L, int tok, struct ctype *ct, enum cparse_
         }
     } else if (cparse_check_tok(L, tok) == TOK_STRUCT || cparse_check_tok(L, tok) == TOK_UNION) {
         tok = cparse_record(L, ct, cparse_check_tok(L, tok) == TOK_UNION, mode);
+    } else if (cparse_check_tok(L, tok) == TOK_ENUM) {
+        tok = cparse_enum(L, ct, mode);
     } else {
 #define INIT_TYPE(t1, t2) \
             ct->type = t1; \
@@ -2950,6 +3948,12 @@ static int cparse_function(lua_State *L, int tok, struct ctype *rtype)
     if (cparse_check_tok(L, tok) != TOK_NAME)
         return cparse_expected_error(L, tok, "identifier");
 
+    if (registry_has_name(L, &cenum_constant_registry, yyget_text())
+            || registry_has_name(L, &ctdef_registry, yyget_text())) {
+        return luaL_error(L, "%d:redefinition of symbol '%s'",
+                yyget_lineno(), yyget_text());
+    }
+
     lua_pushstring(L, yyget_text());
 
     lua_rawgetp(L, LUA_REGISTRYINDEX, &cfunc_registry);
@@ -3003,6 +4007,11 @@ static int cparse_typedef(lua_State *L, int tok, struct ctype *ct)
     if (!name)
         return cparse_expected_error(L, tok, "identifier");
 
+    if (registry_has_name(L, &cenum_constant_registry, name)
+            || registry_has_name(L, &cfunc_registry, name)) {
+        return luaL_error(L, "%d:redefinition of symbol '%s'", yyget_lineno(), name);
+    }
+
     lua_rawgetp(L, LUA_REGISTRYINDEX, &ctdef_registry);
     lua_getfield(L, -1, name);
 
@@ -3044,8 +4053,11 @@ static int lua_ffi_cdef_parse(lua_State *L)
             continue;
         }
 
-        if (cparse_check_tok(L, tok) != ';')
+        if (cparse_check_tok(L, tok) != ';') {
             cparse_function(L, tok, &ct);
+        } else if (ct.type == CTYPE_ENUM && ct.enumeration->anonymous) {
+            free(ct.enumeration);
+        }
     }
 
     cparse_check_tok(L, tok);
@@ -3529,6 +4541,12 @@ int luaopen_ffi(lua_State *L)
 
     lua_newtable(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &crecord_registry);
+
+    lua_newtable(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &cenum_registry);
+
+    lua_newtable(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &cenum_constant_registry);
 
     lua_newtable(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &carray_registry);

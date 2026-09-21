@@ -13,6 +13,16 @@ enum {
     TOK_INTEGER,
     TOK_STRUCT,
     TOK_UNION,
+    TOK_ENUM,
+
+    TOK_LSHIFT,
+    TOK_RSHIFT,
+    TOK_LE,
+    TOK_GE,
+    TOK_EQ,
+    TOK_NE,
+    TOK_LAND,
+    TOK_LOR,
 
     TOK_CONST,
     TOK_SIGNED,

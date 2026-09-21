@@ -35,6 +35,7 @@ ffi.cdef([[
 - 本项目支持的基础 C 标量类型。
 - `typedef` 声明。
 - `struct` 与 `union` 声明（包含嵌套/匿名成员）。
+- 命名和匿名 `enum` 声明，以及枚举整数常量表达式。
 - `__attribute__((packed))` 解析。
 - 支持结构体命名位域（同一记录内位域需共享同一个整型基础类型，例如 `unsigned int a:3; unsigned int b:5;`）。
 - 函数声明与函数指针类型。
@@ -45,6 +46,13 @@ ffi.cdef([[
 - 声明是可叠加的。
 - 已知符号重复定义会报错。
 - `cdef` 仅用于声明（不支持函数定义）。
+- enum 定义必须放在 `ffi.cdef` 中；定义完成后，类型表达式可以引用其标签。
+- 枚举常量支持十进制、八进制和十六进制整数、`U`/`L`/`LL` 后缀、前面已定义的
+  枚举常量、括号、算术、移位、比较、逻辑、位运算以及 `?:`。
+- enum 存储类型跟随构建 lua-ffi 的编译器，包括 `-fshort-enums`；C 库和 lua-ffi
+  必须使用一致的 enum ABI 编译选项。
+- 超出当前 Lua 版本精确数值范围的枚举常量，与其他标量 cdata 转换一样受 Lua
+  整数范围或浮点精度限制。
 - 当前位域限制：匿名位域（如 `:0`）、同一记录内混合整型基础类型位域、以及 union 位域会被拒绝。
 - 当前不支持把“包含位域的结构体”按值用于 C 函数调用或回调签名。
 - 位域布局支持 GCC 和 Clang 的默认 Linux ABI：i686、x86-64（LP64）、ARM EABI（小端）、AArch64（小端、LP64）、MIPS o32（大小端）及 RISC-V64 LP64D。其他目标 ABI 会拒绝位域声明。
@@ -72,6 +80,21 @@ useconds_t suseconds_t blksize_t blkcnt_t time_t
 ```lua
 ffi.cdef([[ int puts(const char *s); ]])
 ffi.C.puts("hello")
+```
+
+枚举常量也可以通过 `ffi.C` 和任意 `ffi.load` 返回的对象访问：
+
+```lua
+ffi.cdef([[
+    enum {
+        COLOR_RED,
+        COLOR_GREEN = 4,
+        COLOR_BLUE
+    };
+]])
+
+assert(ffi.C.COLOR_RED == 0)
+assert(ffi.C.COLOR_BLUE == 5)
 ```
 
 ### `ffi.load(path[, global])`

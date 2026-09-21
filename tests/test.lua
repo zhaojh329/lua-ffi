@@ -19,9 +19,64 @@ local function script_dir()
     return src:match('(.*/)') or './'
 end
 
-local LIB_PATH = script_dir() .. 'libtest.so'
+local LIB_PATH = arg[1] or script_dir() .. 'libtest.so'
 
 ffi.cdef([[
+    enum {
+        ANON_COLOR_RED,
+        ANON_COLOR_GREEN = 4,
+        ANON_COLOR_BLUE,
+    };
+
+    enum TestColor {
+        ENUM_COLOR_RED,
+        ENUM_COLOR_GREEN = 4,
+        ENUM_COLOR_BLUE,
+        ENUM_COLOR_NEGATIVE = -2,
+        ENUM_COLOR_MASK = (1U << 5) | 3
+    };
+
+    enum TestUnsigned {
+        ENUM_UNSIGNED_ZERO,
+        ENUM_UNSIGNED_MAX = 0xffffffffU
+    };
+
+    enum TestSmall {
+        ENUM_SMALL_ZERO,
+        ENUM_SMALL_VALUE = 5
+    };
+
+    enum TestWide {
+        ENUM_WIDE_ZERO,
+        ENUM_WIDE_VALUE = 0x100000000ULL
+    };
+
+    enum TestExpressions {
+        ENUM_OCTAL = 010,
+        ENUM_ALIAS = ENUM_COLOR_MASK,
+        ENUM_ARITHMETIC = (ENUM_ALIAS + 5) * 2,
+        ENUM_COMPARE = ENUM_ARITHMETIC >= 80,
+        ENUM_CONDITIONAL = ENUM_COMPARE ? 101 : 202,
+        ENUM_BITWISE = (~0U & 0xffU) ^ 0x55U,
+        ENUM_SHORT_AND = 0 && (1 / 0),
+        ENUM_SHORT_OR = 1 || (1 / 0),
+        ENUM_CHOOSE_TRUE = 1 ? 7 : (1 / 0),
+        ENUM_CHOOSE_FALSE = 0 ? (1 / 0) : 9
+    };
+
+    struct integer_literal_arrays {
+        char hexadecimal[0x10];
+        char octal[010];
+    };
+
+    typedef enum TestColor TestColor;
+
+    struct enum_holder {
+        char prefix;
+        enum TestColor color;
+        enum TestUnsigned flags;
+    };
+
     typedef struct Point {
         int x;
         int y;
@@ -152,6 +207,22 @@ ffi.cdef([[
     typedef int (*callback_t)(int);
     int call_f4(int x, callback_t cb);
 
+    enum TestColor enum_color_roundtrip(enum TestColor value);
+    enum TestUnsigned enum_unsigned_roundtrip(enum TestUnsigned value);
+    enum TestWide enum_wide_roundtrip(enum TestWide value);
+    enum TestColor call_enum_callback(enum TestColor (*callback)(enum TestColor),
+        enum TestColor value);
+    size_t enum_color_size(void);
+    size_t enum_color_alignment(void);
+    size_t enum_unsigned_size(void);
+    size_t enum_small_size(void);
+    int enum_small_is_signed(void);
+    size_t enum_wide_size(void);
+    size_t enum_holder_size(void);
+    size_t enum_holder_color_offset(void);
+    size_t enum_holder_flags_offset(void);
+    int enum_color_is_signed(void);
+
     int missing_symbol(void);
 ]])
 
@@ -252,6 +323,88 @@ local tests = {
 
         ffi.cdef('struct typeof_defined_tag { int x; };')
         assert(ffi.sizeof('struct typeof_defined_tag') == ffi.sizeof('int'))
+    end,
+    function()
+        local lib = ffi.load(LIB_PATH)
+
+        assert(ffi.C.ANON_COLOR_RED == 0)
+        assert(ffi.C.ANON_COLOR_GREEN == 4)
+        assert(ffi.C.ANON_COLOR_BLUE == 5)
+
+        assert(ffi.C.ENUM_COLOR_RED == 0)
+        assert(ffi.C.ENUM_COLOR_GREEN == 4)
+        assert(ffi.C.ENUM_COLOR_BLUE == 5)
+        assert(ffi.C.ENUM_COLOR_NEGATIVE == -2)
+        assert(ffi.C.ENUM_COLOR_MASK == 35)
+        assert(lib.ENUM_COLOR_MASK == 35)
+
+        assert(ffi.C.ENUM_OCTAL == 8)
+        assert(ffi.C.ENUM_ALIAS == 35)
+        assert(ffi.C.ENUM_ARITHMETIC == 80)
+        assert(ffi.C.ENUM_COMPARE == 1)
+        assert(ffi.C.ENUM_CONDITIONAL == 101)
+        assert(ffi.C.ENUM_BITWISE == 170)
+        assert(ffi.C.ENUM_SHORT_AND == 0)
+        assert(ffi.C.ENUM_SHORT_OR == 1)
+        assert(ffi.C.ENUM_CHOOSE_TRUE == 7)
+        assert(ffi.C.ENUM_CHOOSE_FALSE == 9)
+        assert(ffi.sizeof('struct integer_literal_arrays') == 24)
+
+        assert(tostring(ffi.typeof('enum TestColor')) == 'ctype<enum TestColor>')
+        assert(tostring(ffi.typeof('TestColor')) == 'ctype<enum TestColor>')
+        assert(ffi.istype('enum TestColor', ffi.new('TestColor')))
+        assert(not ffi.istype('int', ffi.new('TestColor')))
+
+        assert(ffi.sizeof('enum TestColor') == lib.enum_color_size())
+        assert(ffi.sizeof('enum TestUnsigned') == lib.enum_unsigned_size())
+        assert(ffi.sizeof('enum TestSmall') == lib.enum_small_size())
+        assert(ffi.sizeof('enum TestWide') == lib.enum_wide_size())
+        assert(lib.enum_color_alignment() <= lib.enum_color_size())
+
+        assert(lib.enum_color_roundtrip(ffi.C.ENUM_COLOR_NEGATIVE) == -2)
+        assert(lib.enum_unsigned_roundtrip(ffi.C.ENUM_UNSIGNED_MAX) == 0xffffffff)
+        assert(lib.enum_wide_roundtrip(ffi.C.ENUM_WIDE_VALUE) == 0x100000000)
+
+        local callback = ffi.cast('enum TestColor (*)(enum TestColor)', function(value)
+            return value + 1
+        end)
+        assert(lib.call_enum_callback(callback, ffi.C.ENUM_COLOR_GREEN) == 5)
+
+        local small = ffi.new('enum TestSmall', -1)
+        assert(ffi.tonumber(small) == (lib.enum_small_is_signed() ~= 0 and -1
+            or 2 ^ (8 * ffi.sizeof(small)) - 1))
+
+        local color = ffi.new('enum TestColor', -1)
+        assert(ffi.tonumber(color) == (lib.enum_color_is_signed() ~= 0 and -1
+            or 2 ^ (8 * ffi.sizeof(color)) - 1))
+
+        local holder = ffi.new('struct enum_holder', {0x5a, ffi.C.ENUM_COLOR_BLUE,
+            ffi.C.ENUM_UNSIGNED_MAX})
+        assert(holder.color == ffi.C.ENUM_COLOR_BLUE)
+        assert(holder.flags == ffi.C.ENUM_UNSIGNED_MAX)
+        assert(ffi.sizeof(holder) == lib.enum_holder_size())
+        assert(ffi.offsetof('struct enum_holder', 'color') == lib.enum_holder_color_offset())
+        assert(ffi.offsetof('struct enum_holder', 'flags') == lib.enum_holder_flags_offset())
+
+        local colors = ffi.new('enum TestColor [2]', {ffi.C.ENUM_COLOR_RED,
+            ffi.C.ENUM_COLOR_GREEN})
+        assert(colors[0] == 0 and colors[1] == 4)
+
+        expect_error(function()
+            ffi.typeof('enum MissingEnum')
+        end, 'undeclared enum')
+
+        expect_error(function()
+            ffi.typeof('enum { TYPE_EXPR_ENUM_VALUE }')
+        end, 'require ffi.cdef')
+
+        expect_error(function()
+            ffi.cdef('enum DuplicateEnumMember { DUPLICATE_ENUM_VALUE, DUPLICATE_ENUM_VALUE };')
+        end, 'redefinition of enum constant')
+
+        expect_error(function()
+            ffi.cdef('enum BadEnumExpression { BAD_ENUM_VALUE = UNKNOWN_ENUM_VALUE };')
+        end, 'unknown enum constant')
     end,
     function()
         assert(type(ffi.VERSION) == 'string')
